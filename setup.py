@@ -144,17 +144,21 @@ class BuildExt(build_ext):
         ]
 
 setup(
-    name='py-desmume',
+    name='py-desmume-mkds',
     version=__version__,
     packages=find_packages(),
     package_data={'desmume': ['**/*.css', '**/*.glade', '**/control_ui/*.glade', 'libdesmume.so', 'libdesmume.dylib', '*.dll']},
     description='Python library to interface with DeSmuME, the Nintendo DS emulator + sample GTK-based frontend',
     long_description=long_description,
     long_description_content_type='text/x-rst',
-    url='https://github.com/SkyTemple/py-desmume/',
+    url='https://github.com/blayyyyyk/py-desmume',
     python_requires=">=3.7",
     install_requires=[
-        'Pillow >= 6.1.0'
+        'Pillow == 11.0.0',
+        'pygobject == 3.50.0',
+        'numpy == 2.4.0',
+        'torch == 2.9.1',
+        'jaxtyping == 0.3.6'
     ],
     classifiers=[
         'Development Status :: 3 - Alpha',
