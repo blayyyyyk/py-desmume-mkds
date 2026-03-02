@@ -1,1026 +1,1225 @@
-import ctypes, torch, numpy as np
-from numpy.lib.recfunctions import structured_to_unstructured
-from numpy.typing import NDArray
-from desmume._emulator import SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT_BOTH
-from desmume._emulator import DeSmuME as _DeSmuME, DeSmuME_Memory as _DeSmuME_Memory
-from typing import (
-    Any,
-    Type,
-    TypeVar,
-    cast,
-    Union,
-    TypedDict,
-    Literal,
-    Generic,
-    cast,
-    Optional,
-)
-from typing import Annotated, Literal
-from typing_extensions import override
-from desmume.mkds.mkds import (
-    VecFx32,
-    VecFx16,
-    camera_t,
-    driver_t,
-    race_state_t,
-    race_status_t,
-    mdat_mapdata_t,
-    kcol_header_t,
-    struct_kcol_prism_data_t,
-    struct_nkm_cpoi_entry_t,
-    struct_race_driver_status_t,
-    RACER_PTR_ADDR,
-    CAMERA_PTR_ADDR,
-    RACE_STATE_PTR_ADDR,
-    RACE_STATUS_PTR_ADDR,
-    MAP_DATA_PTR_ADDR,
-    COLLISION_DATA_ADDR,
-    FX32_SCALE_FACTOR,
-)
-from desmume.vector import (
-    ray_triangle_intersection,
-    ray_line_intersection,
-    generate_plane_vectors,
-)
+"""
+This module contains the Python interface for DeSmuME.
+
+:class:`DeSmuME` is the main entrypoint to load and interact with the emulator.
+"""
+#  Copyright 2020-2024 Marco Köpcke (Capypara)
+#
+#  This file is part of py-desmume.
+#
+#  py-desmume is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  py-desmume is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with py-desmume.  If not, see <https://www.gnu.org/licenses/>.
+import os
+import platform
+from ctypes import cdll, create_string_buffer, cast, c_char_p, POINTER, c_int, c_char, c_uint16, c_uint8, Structure, \
+    c_uint, CFUNCTYPE, c_int8, c_int16, c_uint32, c_int32
+from enum import Enum
+from typing import Union, Callable, List, Optional
+
+try:
+    from PIL import Image
+except ImportError:
+    from pil import Image
+
+from desmume.controls import add_key, rm_key
 
 
-class OctreeNode(ctypes.LittleEndianStructure):
+SCREEN_WIDTH = 256
+SCREEN_HEIGHT = 192
+SCREEN_HEIGHT_BOTH = SCREEN_HEIGHT * 2
+SCREEN_PIXEL_SIZE = SCREEN_WIDTH * SCREEN_HEIGHT
+SCREEN_PIXEL_SIZE_BOTH = SCREEN_WIDTH * SCREEN_HEIGHT_BOTH
+NB_STATES = 10
+
+MEMORY_CB_FN = CFUNCTYPE(None, c_uint, c_int)
+
+MemoryCbFn = Callable[[int, int], None]
+"""
+A callback function for the memory hooks. The first parameter of the callback function will receive the watched address,
+the second the size of the event that triggered it, in bytes (eg. how many bytes were written / read).
+"""
+
+
+def strbytes(s):
+    return s.encode('utf-8')
+
+
+class Language(Enum):
+    """Language codes."""
+    JAPANESE = 0
+    ENGLISH = 1
+    FRENCH = 2
+    GERMAN = 3
+    ITALIAN = 4
+    SPANISH = 5
+
+
+class StartFrom(Enum):
+    """Start codes for movie recording."""
+    START_BLANK = 0
+    START_SRAM = 1
+    START_SAVESTATE = 2
+
+
+class DeSmuME_SDL_Window:
+    """
+    A window that displays the emulator and processes touchscreen and keyboard inputs (default keyboard
+    configuration only).
+    This is meant to be a simple way to use and test the library, for intergration in custom UIs you
+    probably want to process input and display manually.
+
+    Should not be instantiated manually!
+    """
+    def __init__(self, emu: 'DeSmuME', auto_pause=True, use_opengl_if_possible=True):
+        self.lib = emu.lib
+        self.lib.desmume_draw_window_init(bool(auto_pause), bool(use_opengl_if_possible))
+
+    def __del__(self):
+        self.destroy()
+
+    def destroy(self):
+        """Destroy the window."""
+        self.lib.desmume_draw_window_free()
+
+    def draw(self):
+        """Draw the current framebuffer to the window."""
+        self.lib.desmume_draw_window_frame()
+
+    def process_input(self):
+        """Process the touchscreen input for the current cycle."""
+        self.lib.desmume_draw_window_input()
+
+    def has_quit(self) -> bool:
+        """Returns true, when the window was closed by the user."""
+        return bool(self.lib.desmume_draw_window_has_quit())
+
+
+class DeSmuME_Input:
+    """Manage input processing for the emulator. Should not be instantiated manually!"""
+    def __init__(self, emu: 'DeSmuME'):
+        self.emu = emu
+        self.lib = emu.lib
+        self.has_joy = False
+
+    def __del__(self):
+        if self.has_joy:
+            self.joy_uninit()
+
+    def joy_init(self):
+        """Initialize the joystick input processing. Call this to enable automatic joystick input processing."""
+        if not self.has_joy:
+            self.emu.lib.desmume_input_joy_init()
+            self.has_joy = True
+
+    def joy_uninit(self):
+        """De-initialize the joystick input processing."""
+        if self.has_joy:
+            self.lib.desmume_input_joy_uninit()
+
+    def joy_number_connected(self) -> int:
+        """Returns the number of connected joysticks. Joysticks must be initialized."""
+        if self.has_joy:
+            return self.emu.lib.desmume_input_joy_number_connected()
+        raise ValueError("Joystick not initialized.")
+
+    def joy_get_key(self, index: int) -> int:
+        """Get the joystick key assigned to the specified emulator key. Joysticks must be initialized."""
+        if self.has_joy:
+            return self.emu.lib.desmume_input_joy_get_key(index)
+        raise ValueError("Joystick not initialized.")
+
+    def joy_get_set_key(self, index: int) -> int:
+        """
+        Pause the thread and wait for the user to press a button.
+        This button will be assigned to the specified emulator key. Joysticks must be initialized.
+        """
+        if self.has_joy:
+            return self.emu.lib.desmume_input_joy_get_set_key(index)
+        raise ValueError("Joystick not initialized.")
+
+    def joy_set_key(self, index: int, joystick_key_index: int):
+        """
+        Sets the emulator key ``index`` to the specified joystick key ``joystick_key_index``.
+        Joysticks must be initialized.
+        """
+        if self.has_joy:
+            self.emu.lib.desmume_input_joy_set_key(index, joystick_key_index)
+            return
+        raise ValueError("Joystick not initialized.")
+
+    def keypad_update(self, keys: int) -> int:
+        """
+        Update the keypad (pressed DS buttons) of currently pressed emulator keys.
+        You should probably use ``keypad_add_key`` and ``keypad_rm_key`` instead.
+        """
+        self.emu.lib.desmume_input_keypad_update.argtypes = [c_uint16]
+        return self.emu.lib.desmume_input_keypad_update(keys)
+
+    def keypad_get(self) -> int:
+        """Returns the current emulator key keypad (pressed DS buttons)."""
+        self.emu.lib.desmume_input_keypad_update.restype = c_uint16
+        return self.emu.lib.desmume_input_keypad_get()
+
+    def keypad_add_key(self, key: int):
+        """
+        Adds a key to the emulators current keymask (presses it). To be used with ``keymask``:
+
+        >>> from desmume.controls import keymask, Keys
+        >>> keym = keymask(Keys.KEY_A)
+        >>> DeSmuME().input.keypad_add_key(keym)
+        """
+        old_keypad = self.keypad_get()
+        self.keypad_update(add_key(old_keypad, key))
+
+    def keypad_rm_key(self, key: int):
+        """
+        Removes a key from the emulators current keymask (releases it).
+        See ``keypad_add_key`` for a usage example.
+        """
+        old_keypad = self.keypad_get()
+        self.keypad_update(rm_key(old_keypad, key))
+
+    def touch_set_pos(self, x: int, y: int):
+        """Set the specified coordinate of the screen to be touched."""
+        self.emu.lib.desmume_input_set_touch_pos(x, y)
+
+    def touch_release(self):
+        """Tell the emulator, that the user released touching the screen."""
+        self.emu.lib.desmume_input_release_touch()
+
+
+class DeSmuME_Savestate:
+    """
+    Load and save savestates. Either slots can be used  (maximum number of slots is in the constant ``NB_STATES``),
+    or savestates can be directly loaded from / saved to files.
+
+    Should not be instantiated manually!
+    """
+    def __init__(self, emu: 'DeSmuME'):
+        self.emu = emu
+
+    def scan(self):
+        """Scan all savestate slots for if they exist or not. Required to be called before calling ``exists``."""
+        self.emu.lib.desmume_savestate_scan()
+
+    def exists(self, slot_id: int) -> bool:
+        """Returns whether or not a savestate in the specified slot exists."""
+        return bool(self.emu.lib.desmume_savestate_slot_exists(slot_id))
+
+    def load(self, slot_id: int):
+        """Load the savestate in the specified slot. It needs to exist."""
+        return self.emu.lib.desmume_savestate_slot_load(slot_id)
+
+    def save(self, slot_id: int):
+        """Save the current game state to the savestate in the specified slot."""
+        return self.emu.lib.desmume_savestate_slot_save(slot_id)
+
+    def load_file(self, file_name: str):
+        """
+        Load a savestate from file.
+
+        :raise: RuntimeError If the savestate could not be loaded.
+        """
+        if not self.emu.lib.desmume_savestate_load(c_char_p(strbytes(file_name))):
+            raise RuntimeError("Unable to load savesate.")
+
+    def save_file(self, file_name: str):
+        """
+        Save a savestate to file.
+
+        :raise: RuntimeError If the savestate could not be saved.
+        """
+        if not self.emu.lib.desmume_savestate_save(c_char_p(strbytes(file_name))):
+            raise RuntimeError("Unable to save savesate.")
+
+    def date(self, slot_id: int) -> str:
+        """Return the date a savestate was saved at as a string."""
+        self.emu.lib.desmume_savestate_slot_date.restype = c_char_p
+        return str(self.emu.lib.desmume_savestate_slot_date(slot_id), 'utf-8')
+
+
+class DeSmuME_Backup:
+    """
+    Import and export battery save files (backup memory).
+    Supports multiple formats: .sav (raw), .dsv (DeSmuME), .duc (Action Replay), .dss (DSOrganize).
+
+    Should not be instantiated manually!
+    """
+    def __init__(self, emu: 'DeSmuME'):
+        self.emu = emu
+
+    def import_file(self, file_path: str, force_size: int = 0) -> bool:
+        """
+        Import raw battery save.
+
+        :param file_path: Path to raw .sav file
+        :param force_size: Size in bytes (0 = auto-detect)
+        :return: True if import succeeded, False otherwise
+        :raise: FileNotFoundError if the file doesn't exist
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Backup file not found: {file_path}")
+
+        self.emu.lib.desmume_backup_import_file.argtypes = [c_char_p, c_uint]
+        self.emu.lib.desmume_backup_import_file.restype = c_int
+
+        result = self.emu.lib.desmume_backup_import_file(
+            c_char_p(strbytes(file_path)),
+            c_uint(force_size)
+        )
+        return bool(result)
+
+    def export_file(self, file_path: str) -> bool:
+        """
+        Export current battery save to file.
+
+        Saves the current backup memory to a .dsv file.
+
+        :param file_path: Destination path for .dsv file
+        :return: True if export succeeded, False otherwise
+        """
+        self.emu.lib.desmume_backup_export_file.argtypes = [c_char_p]
+        self.emu.lib.desmume_backup_export_file.restype = c_int
+
+        result = self.emu.lib.desmume_backup_export_file(c_char_p(strbytes(file_path)))
+        return bool(result)
+
+
+class DeSmuME_Date(Structure):
+    """A date C struct, to be used with setting a date for movie recording."""
     _fields_ = [
-        # The lowest 31 bits are the offset
-        ("offset", ctypes.c_uint32, 31),
-        # The highest bit (31) is the leaf flag
-        ("is_leaf", ctypes.c_uint32, 1),
+        ("year", c_int),
+        ("month", c_int),
+        ("day", c_int),
+        ("hour", c_int),
+        ("minute", c_int),
+        ("second", c_int),
+        ("millisecond", c_int),
     ]
 
 
-class MMUPrefix(ctypes.Structure):
-    _fields_ = [
-        ("ARM9_ITCM", ctypes.c_uint8 * 0x8000),
-        ("ARM9_DTCM", ctypes.c_uint8 * 0x4000),
-        ("MAIN_MEM", ctypes.c_uint8 * (16 * 1024 * 1024)),
-        # ...
-    ]
+class DeSmuME_Movie:
+    """Record and play movies. Should not be instantiated manually!"""
+    def __init__(self, emu: 'DeSmuME'):
+        self.emu = emu
 
-
-class NDSDisplayInfo(ctypes.Structure):
-    _fields_ = [
-        # --- User-requested settings ---
-        ("colorFormat", ctypes.c_int),  # NDSColorFormat (enum)
-        ("pixelBytes", ctypes.c_uint32),  # u32
-        ("isCustomSizeRequested", ctypes.c_bool),  # bool
-        # Note: Compiler likely adds padding here for alignment
-        ("customWidth", ctypes.c_uint32),  # u32
-        ("customHeight", ctypes.c_uint32),  # u32
-        ("framebufferPageSize", ctypes.c_uint32),  # u32
-        ("framebufferPageCount", ctypes.c_uint32),  # u32
-        ("masterFramebufferHead", ctypes.c_void_p),  # void *
-        ("isDisplayEnabled", ctypes.c_bool * 2),  # bool[2]
-        # --- Frame render state information ---
-        ("bufferIndex", ctypes.c_uint8),  # u8
-        # Note: Compiler likely adds 7 bytes of padding here to align the next u64
-        ("sequenceNumber", ctypes.c_uint64),  # u64
-        ("masterNativeBuffer16", ctypes.POINTER(ctypes.c_uint16)),  # u16 *
-        ("masterCustomBuffer", ctypes.c_void_p),  # void *
-        ("nativeBuffer16", ctypes.POINTER(ctypes.c_uint16) * 2),  # u16 *[2]
-        ("customBuffer", ctypes.c_void_p * 2),  # void *[2]
-        ("renderedWidth", ctypes.c_uint32 * 2),  # u32[2]
-        ("renderedHeight", ctypes.c_uint32 * 2),  # u32[2]
-        ("renderedBuffer", ctypes.c_void_p * 2),  # void *[2]
-        ("engineID", ctypes.c_int * 2),  # GPUEngineID (enum)[2]
-        ("didPerformCustomRender", ctypes.c_bool * 2),  # bool[2]
-        ("masterBrightnessDiffersPerLine", ctypes.c_bool * 2),  # bool[2]
-        # 2D arrays: [2][192]
-        ("masterBrightnessMode", (ctypes.c_uint8 * SCREEN_HEIGHT) * 2),
-        ("masterBrightnessIntensity", (ctypes.c_uint8 * SCREEN_HEIGHT) * 2),
-        ("backlightIntensity", ctypes.c_float * 2),  # float[2]
-        # --- Postprocessing information ---
-        ("needConvertColorFormat", ctypes.c_bool * 2),  # bool[2]
-        ("needApplyMasterBrightness", ctypes.c_bool * 2),  # bool[2]
-    ]
-
-
-T = TypeVar("T", bound=Union[ctypes.Structure, ctypes.Array])
-H = TypeVar("H", bound=ctypes.Structure)
-
-_PrismEntriesAttributes = TypedDict(
-    "_PrismEntriesAttributes",
-    {
-        "shadow_2d": np.ndarray,
-        "light_id": np.ndarray,
-        "ignore_drivers": np.ndarray,
-        "variant": np.ndarray,
-        "collision_type": np.ndarray,
-        "ignore_items": np.ndarray,
-        "is_wall": np.ndarray,
-        "is_floor": np.ndarray,
-    },
-)
-
-
-def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
-    """
-    Vectorized version of parse_attributes.
-
-    Input:  (N,) array of uint16 (or int32)
-    Output: (N,) structured array with named fields
-    """
-    # Define the output format
-    parsed_dtype = np.dtype(
-        [
-            ("shadow_2d", "u1"),  # bit 0
-            ("light_id", "u1"),  # bits 1-4 (3 bits)
-            ("ignore_drivers", "u1"),  # bit 4
-            ("variant", "u1"),  # bits 5-8 (3 bits)
-            ("collision_type", "u1"),  # bits 8-13 (5 bits)
-            ("ignore_items", "u1"),  # bit 13
-            ("is_wall", "u1"),  # bit 14
-            ("is_floor", "u1"),  # bit 15
-        ]
-    )
-
-    result = np.zeros(raw_attrs.shape, dtype=parsed_dtype)
-
-    # Apply Bitwise Logic (Vectorized)
-    result["shadow_2d"] = (raw_attrs >> 0) & 0x1
-    result["light_id"] = (raw_attrs >> 1) & 0x7
-    result["ignore_drivers"] = (raw_attrs >> 4) & 0x1
-    result["variant"] = (raw_attrs >> 5) & 0x7
-    result["collision_type"] = (raw_attrs >> 8) & 0x1F
-    result["ignore_items"] = (raw_attrs >> 13) & 0x1
-    result["is_wall"] = (raw_attrs >> 14) & 0x1
-    result["is_floor"] = (raw_attrs >> 15) & 0x1
-
-    return cast(_PrismEntriesAttributes, result)
-
-
-def _pack_i4_fx32(arr):
-    repacked = structured_to_unstructured(arr, dtype=np.float32)
-    return repacked / (1 << 12)
-
-
-vmap_over_triangles = torch.vmap(
-    ray_triangle_intersection, in_dims=(0, None, None, None, None)
-)
-
-vmap_all_pairs = torch.vmap(vmap_over_triangles, in_dims=(None, 0, 0, None, None))
-
-_PrismEntries = TypedDict(
-    "_PrismEntries",
-    {
-        "height": NDArray[np.int32],  # fx32
-        "posIdx": NDArray[np.int32],
-        "fNrmIdx": NDArray[np.int32],
-        "eNrm1Idx": NDArray[np.int32],
-        "eNrm2Idx": NDArray[np.int32],
-        "eNrm3Idx": NDArray[np.int32],
-        "attribute": NDArray[np.int16],
-    },
-)
-_CollisionEntries = TypedDict(
-    "_CollisionEntries",
-    {
-        "prism": _PrismEntries,
-        "prism_attribute": _PrismEntriesAttributes,
-        "vert": Annotated[NDArray[np.float32], Literal["N", 3]],
-        "nrm": Annotated[NDArray[np.float32], Literal["N", 3]],
-    },
-)
-_TriangleVertices = TypedDict(
-    "_TriangleVertices", {"v1": torch.Tensor, "v2": torch.Tensor, "v3": torch.Tensor}
-)
-_CheckpointPos = TypedDict(
-    "_CheckpointPos",
-    {
-        "current_checkpoint_id": int,
-        "current_checkpoint_pos": torch.Tensor,
-        "next_checkpoint_id": int,
-        "next_checkpoint_pos": torch.Tensor,
-    },
-)
-_CheckpointAngle = TypedDict("_CheckpointAngle", {"midpoint_angle": torch.Tensor})
-RayCastInfo = TypedDict(
-    "RayCastInfo",
-    {"distance": torch.Tensor, "position": torch.Tensor, "mask": torch.Tensor},
-)
-
-
-class CheckpointInfo(_CheckpointPos, _CheckpointAngle):
-    pass
-
-
-class CollisionData(_CollisionEntries, _TriangleVertices):
-    pass
-
-
-class DeSmuME_Memory(_DeSmuME_Memory):
-    """
-    A memory interface for Mario Kart DS emulator data access. Extends DeSmuME_Memory to read and process
-    game data structures including driver information, camera settings, race status, collision data, and
-    checkpoint information. Provides utilities for memory reading, collision detection, coordinate space
-    transformations, and ray casting for obstacle detection.
-
-    Attributes
-    ----------
-    `_memoryview` (`memoryview`): Direct access to emulator main memory.\n
-    `_driver` (`driver_t`): Cached driver structure.\n
-    `_camera` (`camera_t`): Cached camera structure.\n
-    `_race_status` (`race_status_t`): Cached race status structure.\n
-    `_map_data` (`mdat_mapdata_t`): Cached map data structure.\n
-    `_cpoi_data` (`ctypes`.Array): Cached checkpoint data array.\n
-    `_kcl_header` (`kcol_header_t`): Cached collision header.\n
-    `_kcl_data` (`dict`): Cached processed collision data.\n
-    `_race_state` (`race_state_t`): Cached race state structure.\n
-    `_ready` (`bool`): Flag indicating if race has started.\n
-    `_device` (`torch`.device): Target device for tensor operations.
-
-    Methods
-    -------
-    `read_struct`: Read a ctypes structure from memory at a given address.\n
-    `memoryview`: Property for accessing main memory view.\n
-    `driver`: Property for cached driver data.\n
-    `camera`: Property for cached camera data.\n
-    `race_status`: Property for cached race status.\n
-    `map_data`: Property for cached map data.\n
-    `checkpoint_data`: Property for cached checkpoint array.\n
-    `collision_header`: Property for cached collision header.\n
-    `race_state`: Property for cached race state.\n
-    `race_ready`: Property indicating if race has started.\n
-    `collision_data`: Property for processed collision triangles and attributes.\n
-    `driver_status`: Property for current driver status.\n
-    `frame_count_race_start`: Property for frame count at race start.\n
-    `frame_count`: Property for current frame count.\n
-    `get_camera_settings`: Retrieve camera FOV, aspect ratio, and clipping planes.\n
-    `project_to_screen`: Transform 3D world points to 2D screen space with depth.\n
-    `checkpoint_pos`: Get current and next checkpoint positions.\n
-    `checkpoint_angle`: Calculate checkpoint midpoint angle in driver local space.\n
-    `checkpoint_info`: Combined checkpoint position and angle information.\n
-    `read_facing_point_checkpoint`: Calculate intersection of driver direction ray with next checkpoint line.\n
-    `obstacle_info`: Perform ray casting to detect nearby obstacles and walls.\n
-    `get_obs`: Aggregate obstacle distances and checkpoint angle for observation.\n
-    `collision_search`: Find collision triangles at a given 3D point using octree search.\n
-    `set_torch_device`: Set the target device for tensor operations.\n
-    `get_torch_device`: Retrieve the current target device.
-    """
-
-    def __init__(self, *args, device: torch.device, **kwargs) -> None:
+    def play(self, file_name: str):
         """
-        Initialize the emulator with memory access and state management.
+        Load a movie file from a file and play it back.
 
-        Args
-        ----
-        *args: Variable length argument list passed to parent class.
-            device (torch.device): The torch device (CPU or GPU) to use for computations.
-            **kwargs: Arbitrary keyword arguments passed to parent class.
-
-        Raises:
-            AssertionError: If the emulator library is not loaded (self.emu.lib is None).
-
-        Attributes:
-            _memoryview: Memory view of the emulator's main memory.
-            _driver: Optional driver state structure.
-            _camera: Optional camera state structure.
-            _race_status: Optional race status structure.
-            _map_data: Optional map data structure.
-            _cpoi_data: Optional collision point of interest data array.
-            _kcl_header: Optional KCL collision header structure.
-            _kcl_data: Optional processed collision data.
-            _race_state: Optional race state structure.
-            _ready: Flag indicating if emulator is ready (initialized as False).
-            _device: The torch device for computations.
+        :raise: RuntimeError If playback failed.
         """
-        super().__init__(*args, **kwargs)
-        assert self.emu.lib is not None
-        self._memoryview = memoryview(MMUPrefix.in_dll(self.emu.lib, "MMU").MAIN_MEM)
-        self._driver: Optional[driver_t] = None
-        self._camera: Optional[camera_t] = None
-        self._race_status: Optional[race_status_t] = None
-        self._map_data: Optional[mdat_mapdata_t] = None
-        self._cpoi_data: Optional[ctypes.Array[struct_nkm_cpoi_entry_t]] = None
-        self._kcl_header: Optional[kcol_header_t] = None
-        self._kcl_data: Optional[CollisionData] = None
-        self._race_state: Optional[race_state_t] = None
-        self._ready = False
-        self._device = device
+        self.emu.lib.desmume_movie_play.restype = c_char_p
+        err = self.emu.lib.desmume_movie_play(c_char_p(strbytes(file_name)))
+        if err is not None and err != "":
+            raise RuntimeError(str(err, 'utf-8'))
 
-    def read_struct(self, struct_t: Type[T], addr: int) -> T:
+    def record(
+            self, file_name: str, author_name: str,
+            start_from: StartFrom = StartFrom.START_BLANK, sram_save: str = "", rtc_date: DeSmuME_Date = None
+    ):
         """
-        Read a structured data type from memory at the specified address.
+        Record a movie.
 
-        Args
-        ----
-        struct_t (Type[T]): The ctypes.Structure type to read from memory.
-            addr (int): The memory address to read from.
-
-        Returns
-        -------
-        `T`: An instance of the specified `ctypes.Structure` type populated with data from memory.
+        :param file_name: The name of the file to save to.
+        :param author_name: Name of the author of the movie.
+        :param start_from: Where to start the recording from.
+        :param sram_save: Filename of the SRAM save to use, optional.
+        :param rtc_date: Date to set the real-time-clock to, optional, defaults to now.
+        :return:
         """
-        return MarioKart_Memory._read_struct(
-            self.memoryview, struct_t, addr
-        )  # main memory region
-
-    @property
-    def memoryview(self) -> memoryview:
-        """
-        Get a memoryview object of the emulator's memory.
-
-        Returns
-        -------
-        `memoryview`: A memoryview object providing a buffer interface to the emulator's memory.
-        """
-        return self._memoryview
-
-    @staticmethod
-    def _read_struct(mem, struct_t: Type[T], addr: int) -> T:
-        struct = struct_t.from_buffer(mem, addr - 0x02000000)  # main memory region
-        return struct
-
-    @property
-    def driver(self) -> driver_t:
-        """
-        Get the driver object for the current racer.
-
-        Lazily loads the driver data from memory on first access by reading from the
-        racer pointer address and parsing it as a driver_t struct. Subsequent calls
-        return the cached driver object.
-
-        Returns
-        -------
-        `driver_t`: The driver object associated with the current racer.
-        """
-        if self._driver is None:
-            driver_addr = self.unsigned.read_long(RACER_PTR_ADDR)
-            self._driver = self.read_struct(driver_t, driver_addr)
-
-        return self._driver
-
-    @property
-    def camera(self) -> camera_t:
-        """
-        Retrieve the camera structure from emulator memory.
-
-        Lazily loads and caches the camera data from the emulator's memory.
-        On first access, reads the camera pointer address and constructs the
-        camera structure. Subsequent calls return the cached camera object.
-
-        Returns
-        -------
-        `camera_t`: The camera structure containing camera state and properties.
-        """
-        if self._camera is None:
-            camera_addr = self.unsigned.read_long(CAMERA_PTR_ADDR)
-            self._camera = self.read_struct(camera_t, camera_addr)
-
-        return self._camera
-
-    @property
-    def race_status(self) -> race_status_t:
-        """
-        Retrieve the current race status information.
-
-        Returns
-        -------
-        `race_status_t`: A structured object containing race status data including
-                           track information, player position, lap count, and race state.
-                           The result is cached after the first read to avoid repeated
-                           memory access.
-
-        Raises:
-        `Exception`: May raise exceptions from read_struct or memory read operations
-                       if the race status pointer address is invalid.
-        """
-        if self._race_status is None:
-            race_status_addr = self.unsigned.read_long(RACE_STATUS_PTR_ADDR)
-            self._race_status = self.read_struct(race_status_t, race_status_addr)
-
-        return self._race_status
-
-    @property
-    def map_data(self) -> mdat_mapdata_t:
-        """
-        Retrieve the map data structure from emulator memory.
-
-        Lazily loads and caches the map data by reading from the MAP_DATA_PTR_ADDR
-        address. Subsequent calls return the cached value without re-reading memory.
-
-        Returns
-        -------
-        `mdat_mapdata_t`: The map data structure containing map information.
-        """
-        if self._map_data is None:
-            map_data_addr = self.unsigned.read_long(MAP_DATA_PTR_ADDR)
-            self._map_data = self.read_struct(mdat_mapdata_t, map_data_addr)
-
-        return self._map_data
-
-    @property
-    def checkpoint_data(self) -> ctypes.Array[struct_nkm_cpoi_entry_t]:
-        """
-        Retrieve the checkpoint data from the emulator's map.
-
-        Lazily loads and caches the checkpoint point of interest (cpoi) data structure
-        from the emulator's memory. On first call, reads the cpoi array from memory based
-        on the map data's cpoi count and offset. Subsequent calls return the cached data.
-
-        Returns
-        -------
-        `ctypes.Array[struct_nkm_cpoi_entry_t]`: A ctypes array of checkpoint entries
-                containing checkpoint data for the current map. The array length corresponds
-                to the map's checkpoint count.
-        """
-        if self._cpoi_data is None:
-            mdata = self.map_data
-            CpoiArrayType = struct_nkm_cpoi_entry_t * int(mdata.cpoiCount)
-            self._cpoi_data = self.read_struct(CpoiArrayType, mdata.cpoi.value)
-
-        return self._cpoi_data
-
-    @property
-    def collision_header(self) -> kcol_header_t:
-        """
-        Retrieve the collision header structure from the emulator.
-
-        Lazily loads and caches the collision header data from the emulator's memory
-        at the predefined COLLISION_DATA_ADDR address. Subsequent calls return the
-        cached header without re-reading from memory.
-
-        Returns
-        -------
-        `kcol_header_t`: The collision header structure containing collision data metadata.
-        """
-        if self._kcl_header is None:
-            self._kcl_header = self.read_struct(kcol_header_t, COLLISION_DATA_ADDR)
-
-        return self._kcl_header
-
-    @property
-    def race_state(self) -> race_state_t:
-        """
-        Retrieve the current race state.
-
-        Returns the cached race state object if it has been previously loaded.
-        Otherwise, reads the race state from memory at the address stored in
-        RACE_STATE_PTR_ADDR, caches it, and returns it.
-
-        Returns
-        -------
-        `race_state_t`: The current race state object containing race information.
-        """
-        if self._race_state is None:
-            addr = self.unsigned.read_long(RACE_STATE_PTR_ADDR)
-            self._race_state = self.read_struct(race_state_t, addr)
-
-        return self._race_state
-
-    @property
-    def race_ready(self):
-        """
-        Determine if the race is ready to start based on frame counter state.
-
-        Checks if the difference between the current frame counter and a secondary
-        frame counter equals 1, indicating the race is in a ready state. Once ready
-        is set to True, it remains True for subsequent calls.
-
-        Returns
-        -------
-        `bool`: True if the race is ready, False otherwise.
-        """
-        try:
-            _f = self.race_state.frameCounter - self.race_state.frameCounter2
-        except:
-            return False
-
-        if not self._ready:
-            self._ready = _f == 1
-
-        return self._ready
-
-    X = TypeVar("X", bound=ctypes.Structure)
-
-    def _np_entries(self, c_struct: type[X], count, offset):
-        ArrayType = c_struct * int(count)
-        entries_ctypes = self.read_struct(ArrayType, offset)
-        entries = np.ctypeslib.as_array(entries_ctypes)
-        return entries
-
-    def _col_prisms(self, start_ptr, end_ptr) -> _PrismEntries:
-        count = (end_ptr.value - (start_ptr.value + 0x10)) // ctypes.sizeof(
-            struct_kcol_prism_data_t
-        )
-        return cast(
-            _PrismEntries,
-            self._np_entries(struct_kcol_prism_data_t, count, start_ptr.value + 0x10),
-        )
-
-    def _col_verts(self, ptr, count) -> Annotated[NDArray[np.float32], Literal["N", 3]]:
-        return self._np_entries(VecFx32, count, ptr.value)
-
-    def _col_nrms(self, ptr, count) -> Annotated[NDArray[np.float32], Literal["N", 3]]:
-        return self._np_entries(VecFx16, count, ptr.value)
-
-    def _col_entries(self) -> _CollisionEntries:
-        header = self.collision_header
-        prism = self._col_prisms(
-            header.prismDataOffset, header.blockDataOffset
-        )  # triangular prisms
-        prism_attribute = _unpack_col_attributes(prism["attribute"])
-        vert = self._col_verts(
-            header.posDataOffset, prism["posIdx"].max() + 1
-        )  # vertices
-        nrm_ids = np.stack(
-            [prism["fNrmIdx"], prism["eNrm1Idx"], prism["eNrm2Idx"], prism["eNrm3Idx"]]
-        )
-        nrm = self._col_nrms(header.nrmDataOffset, nrm_ids.max() + 1)  # normals
-
-        return {
-            "prism": prism,
-            "prism_attribute": prism_attribute,
-            "vert": vert,
-            "nrm": nrm,
-        }
-
-    def _col_prism_vertices(
-        self,
-        prisms: _PrismEntries,
-        positions: Annotated[NDArray[np.float32], Literal["N", 3]],
-        normals: Annotated[NDArray[np.float32], Literal["N", 3]],
-    ) -> _TriangleVertices:
-        height = cast(NDArray[np.float32], prisms["height"]["val"]) / (1 << 12)
-        v1 = _pack_i4_fx32(positions[prisms["posIdx"]])
-        fNrm = _pack_i4_fx32(normals[prisms["fNrmIdx"]])
-        eNrm1 = _pack_i4_fx32(normals[prisms["eNrm1Idx"]])
-        eNrm2 = _pack_i4_fx32(normals[prisms["eNrm2Idx"]])
-        eNrm3 = _pack_i4_fx32(normals[prisms["eNrm3Idx"]])
-
-        crossA = np.cross(eNrm1, fNrm, axis=-1)
-        crossB = np.cross(eNrm2, fNrm, axis=-1)
-
-        v2: np.ndarray = v1 + crossB * (height / np.vecdot(eNrm3, crossB))[:, None]
-        v3: np.ndarray = v1 + crossA * (height / np.vecdot(eNrm3, crossA))[:, None]
-
-        return {
-            "v1": torch.tensor(v1, dtype=torch.float32),
-            "v2": torch.tensor(v2, dtype=torch.float32),
-            "v3": torch.tensor(v3, dtype=torch.float32),
-        }
-
-    @property
-    def collision_data(self) -> CollisionData:
-        """
-        Retrieve collision data from the KCL (Collision) file.
-
-        Lazily initializes and caches collision data on first access. Parses collision
-        entries, prism vertices, and normal vectors from the KCL data structure.
-
-        Returns
-        -------
-        `CollisionData`: A dictionary containing collision entries, prism data,
-                          vertex positions, and normal vectors.
-        """
-        if self._kcl_data is None:
-            entries = self._col_entries()
-            triangles = self._col_prism_vertices(
-                entries["prism"], entries["vert"], entries["nrm"]
+        if not rtc_date:
+            self.emu.lib.desmume_movie_record(
+                c_char_p(strbytes(file_name)), c_char_p(strbytes(author_name)), start_from.value, c_char_p(strbytes(sram_save))
             )
-            self._kcl_data = {**entries, **triangles}
-
-        return cast(CollisionData, self._kcl_data)
-
-    @property
-    def driver_status(self):
-        """
-        Get the status of the primary driver (driver 0).
-
-        Returns
-        -------
-        `dict`: A dictionary containing the status information of driver 0,
-                  including position, speed, lap count, and other driver-related data.
-        """
-        return self.get_driver_status(0)
-
-    @property
-    def frame_count_race_start(self) -> int:
-        """
-        Get the frame count since the start of the race.
-
-        Returns
-        -------
-        `int`: The current frame counter value from the race status.
-        """
-        return self.race_status.time.frameCounter
-
-    @property
-    def frame_count(self) -> int:
-        """
-        Get the current frame count of the race.
-
-        Returns
-        -------
-        `int`: The frame counter value from the current race state.
-        """
-        return self.race_state.frameCounter
-
-    def _octree_search(self, point: tuple[float, float, float]):
-        header = self.collision_header
-
-        px, py, pz = point
-        minx, miny, minz = header.areaMinPos
-
-        x = int(px - (minx / (1 << 12)))
-        if (x & header.areaXWidthMask) != 0:
-            return None
-
-        y = int(py - (miny / (1 << 12)))
-        if (y & header.areaYWidthMask) != 0:
-            return None
-
-        z = int(pz - (minz / (1 << 12)))
-        if (z & header.areaZWidthMask) != 0:
-            return None
-
-        block_start: int = header.blockDataOffset.value
-        node_count = (len(self.memoryview) - block_start) // 4
-        NodeArrayType = OctreeNode * node_count
-        nodes = self.read_struct(NodeArrayType, block_start)
-
-        # initialize root
-        shift = header.blockWidthShift
-        cur_node_idx = 0  # root at start of block_data
-
-        child_idx = (
-            ((z >> shift) << header.areaXYBlockShift)
-            | ((y >> shift) << header.areaXBlockShift)
-            | (x >> shift)
-        )
-
-        while True:
-            node = nodes[cur_node_idx + child_idx]
-
-            if node.is_leaf:
-                # negative flag = leaf node
-                return block_start + (cur_node_idx * 4) + node.offset
-
-            cur_node_idx += node.offset // 4
-            shift -= 1
-
-            # initialize next index
-            child_idx = (
-                ((z >> shift) & 1) << 2 | ((y >> shift) & 1) << 1 | ((x >> shift) & 1)
+        else:
+            self.emu.lib.desmume_movie_record_from_date(
+                c_char_p(strbytes(file_name)), c_char_p(strbytes(author_name)), start_from.value, c_char_p(strbytes(sram_save)), rtc_date
             )
 
-    def collision_search(self, point: tuple[float, float, float]):
-        block_data_offset = self.collision_header.blockDataOffset
-        leaf_offset = self._octree_search(point)
+    def stop(self):
+        """Stops the current movie playback."""
+        self.emu.lib.desmume_movie_stop()
 
-        tri_indices: list[int] = []
-        start = block_data_offset + leaf_offset + 2
-        entry_count = (len(self.get_memoryview()) - start) // 2
-        ChunkArrayType = ctypes.c_uint16 * entry_count
-        chunks = self.read_struct(ChunkArrayType, start)
-        for val in chunks:
-            if val == 0:
-                break
+    def is_active(self):
+        return bool(self.emu.lib.desmume_movie_is_active())
 
-            tri_indices.append(val - 1)
+    def is_recording(self):
+        return bool(self.emu.lib.desmume_movie_is_recording())
 
-        if len(tri_indices) == 0:
-            return None
+    def is_playing(self):
+        return bool(self.emu.lib.desmume_movie_is_playing())
 
-        return tri_indices
+    def is_finished(self):
+        return bool(self.emu.lib.desmume_movie_is_finished())
 
-    def get_driver_status(self, index) -> struct_race_driver_status_t:
-        """
-        Retrieve the status of a driver at the specified index.
+    def get_length(self):
+        if self.is_active():
+            return self.emu.lib.desmume_movie_get_length()
+        raise ValueError("No movie is active.")
 
-        Args
-        ----
-        index: The index of the driver in the race status array.
+    def get_name(self):
+        if self.is_active():
+            self.emu.lib.desmume_movie_get_name.restype = c_char_p
+            return self.emu.lib.desmume_movie_get_name()
+        raise ValueError("No movie is active.")
 
-        Returns
-        -------
-        `struct_race_driver_status_t`: A structure containing the driver's current status information.
-        """
-        return self.race_status.driverStatus[index]
+    def get_rerecord_count(self):
+        if self.is_active():
+            return self.emu.lib.desmume_movie_get_rerecord_count()
+        raise ValueError("No movie is active.")
 
-    # PyTorch API Methods #
-    def set_torch_device(self, device: torch.device):
-        self._device = device
+    def set_rerecord_count(self, count: int):
+        if self.is_active():
+            return self.emu.lib.desmume_movie_set_rerecord_count(count)
+        raise ValueError("No movie is active.")
 
-    def get_torch_device(self):
-        """
-        Get the torch device used for tensor operations.
+    def get_readonly(self):
+        if self.is_active():
+            return bool(self.emu.lib.desmume_movie_get_readonly())
+        raise ValueError("No movie is active.")
 
-        Returns
-        -------
-        `torch`.device: The device (CPU, CUDA, or MPS) configured for this emulator instance.
-        """
-        return self._device
-
-    # Memory API Methods #
-    def get_camera_settings(self):
-        """
-        Retrieve the current camera settings.
-
-        Returns
-        -------
-        `dict`: A dictionary containing the camera configuration parameters:
-                - fov_sin (float): Sine of the field of view angle.
-                - fov_cos (float): Cosine of the field of view angle.
-                - aspect (float): The aspect ratio of the camera viewport.
-                - far (float): The far clipping plane distance.
-                - near (float): The near clipping plane distance.
-        """
-        return {
-            "fov_sin": self.camera.fovSin,
-            "fov_cos": self.camera.fovCos,
-            "aspect": self.camera.aspectRatio,
-            "far": self.camera.frustumFar,
-            "near": self.camera.frustumNear,
-        }
-
-    # Screen API Methods #
-    def _mv_matrix(self):
-        device = self.get_torch_device()
-
-        out = torch.eye(4).to(device)
-        mtx = self.camera.mtx.to(device).T
-        mtx[:3, 3] *= 16  # position is scaled by 16
-        out[:3, :] = mtx
-
-        return out
-
-    def _proj_matrix(self, epsilon=1e-8):
-        device = self.get_torch_device()
-
-        cam = self.get_camera_settings()
-
-        # opengl projection matrix
-        out = torch.zeros((4, 4), device=device)
-        out[0, 0] = cam["fov_cos"] / (max(cam["fov_sin"] * cam["aspect"], epsilon))
-        out[1, 1] = cam["fov_cos"] / (max(cam["fov_sin"], epsilon))
-        out[2, 2] = -(cam["far"] + cam["near"]) / max(cam["far"] - cam["near"], epsilon)
-        out[2, 3] = -(2 * cam["far"] * cam["near"]) / max(
-            cam["far"] - cam["near"], epsilon
-        )
-        out[3, 2] = -1
-
-        return out
-
-    def _convert_to_camera_space(self, points: torch.Tensor):
-        mvm = self._mv_matrix()
-        padded = torch.nn.functional.pad(points, (0, 1), "constant", 1)
-        cam_space = (mvm @ padded.T).T  # convert to camera space
-        return cam_space
-
-    def _convert_to_screen_space(self, points: torch.Tensor):
-        pm = self._proj_matrix()
-        far = self.get_camera_settings()["far"]
-        cam_space = self._convert_to_camera_space(points)  # convert to camera space
-
-        # convert to clip space
-        clip_space = (pm @ cam_space.T).T
-
-        # depth
-        ndc = (
-            clip_space[:, :3] / clip_space[:, 3, None]
-        )  # normalize w/ respect to w (new shape: (B, 3))
-
-        # screen space
-        screen_x = (ndc[:, 0] + 1) / 2 * SCREEN_WIDTH
-        screen_y = (
-            (1 - ndc[:, 1]) / 2 * SCREEN_HEIGHT
-        )  # Both DS screens are stitched into one. we only consider the top screen height
-
-        screen_depth = clip_space[:, 2]
-
-        return {
-            "screen": torch.stack([screen_x, screen_y], dim=-1),
-            "depth": screen_depth,
-        }
-
-    def _get_screen_z_clip_mask(self, screen_space):
-        cam = self.get_camera_settings()
-        z_clip: torch.Tensor = (screen_space[:, 2] > cam["near"]) & (
-            screen_space[:, 2] < cam["far"]
-        )
-
-        return z_clip
-
-    def project_to_screen(
-        self, points: torch.Tensor, normalize_depth=False
-    ) -> dict[str, torch.Tensor]:
-        """
-        Project 3D points to 2D screen space with optional depth normalization.
-
-        Args
-        ----
-        points (torch.Tensor): 3D points to project to screen space.
-            normalize_depth (bool, optional): Whether to normalize depth values using the camera's far plane. Defaults to False.
-
-        Returns
-        -------
-        `dict[str, torch.Tensor]`: Dictionary containing:
-                - 'screen': Tensor with projected 2D screen coordinates and normalized/raw depth values.
-                - 'mask': Boolean mask indicating which points are within the screen's z-clipping bounds.
-        """
-        sd = self._convert_to_screen_space(points)
-        out = torch.cat([sd["screen"], sd["depth"][:, None]], dim=-1)
-        mask = self._get_screen_z_clip_mask(out)
-        if normalize_depth:
-            far = self.get_camera_settings()["far"]
-            out[:, 2] = -far / (-far + out[:, 2])
-
-        return {"screen": out, "mask": mask}
-
-    def checkpoint_pos(self, device=None) -> _CheckpointPos:
-        curr_checkpoint_id = self.driver_status.curCpoi
-        next_checkpoint_id = (
-            curr_checkpoint_id + 1
-            if curr_checkpoint_id + 1 < self.map_data.cpoiCount
-            else 0
-        )
-        curr_entry = self.checkpoint_data[curr_checkpoint_id]
-        next_entry = self.checkpoint_data[next_checkpoint_id]
-        _y = self.camera.target[1].item()
-
-        curr_checkpoint_pos = torch.tensor(
-            [[curr_entry.x1, _y, curr_entry.z1], [curr_entry.x2, _y, curr_entry.z2]],
-            dtype=torch.float32,
-            device=device,
-        )
-
-        next_checkpoint_pos = torch.tensor(
-            [[next_entry.x1, _y, next_entry.z1], [next_entry.x2, _y, next_entry.z2]],
-            dtype=torch.float32,
-            device=device,
-        )
-
-        out: _CheckpointPos = {
-            "current_checkpoint_id": curr_checkpoint_id,
-            "current_checkpoint_pos": curr_checkpoint_pos,
-            "next_checkpoint_id": next_checkpoint_id,
-            "next_checkpoint_pos": next_checkpoint_pos,
-        }
-
-        return out
-
-    def checkpoint_angle(self, device=None) -> _CheckpointAngle:
-        pos_info = self.checkpoint_pos(device)
-        C = pos_info["next_checkpoint_pos"]
-        mp = (C[0, :] - C[1, :]) / 2  # midpoint
-        M = self.driver.mainMtx.to(device)[:3, :]
-        mp_local = mp @ M.T
-        mp_angle = torch.atan2(mp_local[2], mp_local[0])
-        out: _CheckpointAngle = {"midpoint_angle": mp_angle}
-        return out
-
-    def checkpoint_info(self, device=None) -> CheckpointInfo:
-        pos_info = self.checkpoint_pos(device)
-        angle_info = self.checkpoint_angle(device)
-        out: CheckpointInfo = {**pos_info, **angle_info}
-        return out
-
-    def read_facing_point_checkpoint(self, device=None):
-        position = self.driver.position
-        direction = self.driver.direction
-        checkpoint = self.checkpoint_info()["next_checkpoint_pos"]
-        mask_xz = torch.tensor([0, 2], dtype=torch.int32, device=device)
-        pos_xz = position[mask_xz]
-        dir_xz = direction[mask_xz]
-        pxz_1, pxz_2 = checkpoint[:, mask_xz].chunk(2, dim=0)
-        pxz_1 = pxz_1.squeeze(0)
-        pxz_2 = pxz_2.squeeze(0)
-        intersect, _ = ray_line_intersection(pos_xz, dir_xz, pxz_1, pxz_2)
-        intersect = torch.tensor(
-            [intersect[0], position[1], intersect[1]], device=device
-        )
-        return intersect
-
-    def obstacle_info(self, n_rays, max_dist=float("inf"), device=None) -> RayCastInfo:
-        M = self.driver.mainMtx.to(device)[:3, :].T
-        pos = self.driver.position.to(device)
-        _, R = generate_plane_vectors(n_rays, 180, M, pos)
-        pos[1] += 10.0
-        pos = pos.unsqueeze(0)
-        col_data = self.collision_data
-        wall_mask = col_data["prism_attribute"]["is_floor"] != 1
-
-        v1 = col_data["v1"].to(device)
-        v2 = col_data["v2"].to(device)
-        v3 = col_data["v3"].to(device)
-        V = torch.stack([v1, v2, v3], dim=1)
-        V = V[wall_mask, :, :]  # (B, 3, 3)
-        B = R.shape[0]
-        P = pos.repeat(B, 1)
-
-        all_hits = vmap_all_pairs(V, P, R, False, 1e-6)
-        distances = all_hits[:, :, 0]
-        min_dists, hit_ids = torch.min(
-            torch.nan_to_num(distances, nan=float("inf")), dim=1
-        )
-        valid_rays_mask = min_dists < max_dist
-        min_dists[~valid_rays_mask] = max_dist
-
-        out: RayCastInfo = {
-            "distance": min_dists,
-            "position": P + (R * min_dists[:, None]),
-            "mask": valid_rays_mask,
-        }
-
-        return out
-
-    def get_obs(self, n_rays, max_dist, device=None):
-        return torch.cat(
-            [
-                self.obstacle_info(n_rays, max_dist=max_dist, device=device)[
-                    "distance"
-                ],
-                self.checkpoint_info(device)["midpoint_angle"].reshape(1),
-            ],
-            dim=-1,
-        )
-
-    def reset(self):
-        self._driver: Optional[driver_t] = None
-        self._camera: Optional[camera_t] = None
-        self._race_status: Optional[race_status_t] = None
-        self._map_data: Optional[mdat_mapdata_t] = None
-        self._cpoi_data: Optional[ctypes.Array[struct_nkm_cpoi_entry_t]] = None
-        self._kcl_header: Optional[kcol_header_t] = None
-        self._kcl_data: Optional[CollisionData] = None
-        self._race_state: Optional[race_state_t] = None
-        self._ready = False
+    def set_readonly(self, state: bool):
+        if self.is_active():
+            return self.emu.lib.desmume_movie_set_readonly(state)
+        raise ValueError("No movie is active.")
 
 
-MT = TypeVar("MT", bound=Union[np.ndarray, list])
-
-
-class DeSmuME(_DeSmuME):
+class MemoryAccessor:
     """
-    MarioKart emulator class that extends DeSmuME with ML-specific functionality.
+    Pythonic accessor class for manipulating the memory.
 
-    This class wraps a Mario Kart emulator to support machine learning training by:
-    - Capturing game observations (rays) as input vectors
-    - Recording input/output pairs for supervised learning
-    - Computing gradients of observations across frames
-    - Managing file I/O for dataset collection
+    Access a single unsigned byte of memory at offset 0x100:
 
-    Attributes
-    ----------
-    `device` (`torch.device`): PyTorch device for tensor computations (cpu or cuda).\n
-    `has_grad` (`bool`): Whether to compute and include observation gradients.\n
-    `n_rays` (`int`): Number of ray-cast sensors for observation generation.\n
-    `max_dist` (`float`): Maximum distance for ray-cast sensors.\n
-    `count` (`int`): Frame counter since emulator initialization.\n
-    `memory` (`MarioKart_Memory`): Custom memory interface for game state access.
+    >>> emu_memory = DeSmuME().memory
+    >>> emu_memory.unsigned[0x100]
+    <<< 3
 
-    Examples
-    --------
-    ```python
-    mk = MarioKart(rom_path, n_rays=8, has_grad=True, device=torch.device("cuda"))
-    mk.enable_file_io(state_file, trace_file, metadata_file)
-    for _ in range(1000):
-        mk.cycle(with_joystick=False)
-    mk.close()
-    ```
+    Access a subset of the memory as bytes:
+
+    >>> emu_memory = DeSmuME().memory
+    >>> emu_memory.unsigned[0x100:0x200]
+    <<< bytes(...)
+
+    Access a subset of the memory as signed integers:
+
+    >>> emu_memory = DeSmuME().memory
+    >>> emu_memory.signed[0x100:0x200]
+    <<< [-3, 2, ...]
+
+    Access a subset of memory as 4-byte unsigned integers:
+
+    >>> emu_memory = DeSmuME().memory
+    >>> emu_memory.unsigned[0x100:0x200:4]
+    <<< [-236, 1002, ...]
+
+    Writing to memory works the same way. It doesn't matter if you use the signed or unsigned accessor for this, both
+    work the same:
+
+    >>> emu_memory = DeSmuME().memory
+    >>> emu_memory.unsigned[0x100] = 2
+
+    You can also use the ``read_*`` methods instead for a more verbose way to read the memory as integers.
+    For writing those methods can be found in the ``DeSmuME_Memory`` parent object.
+
+    Should not be instantiated manually!
+
     """
+    def __init__(self, signed, mem: 'DeSmuME_Memory'):
+        self.signed = signed
+        self.mem = mem
 
-    def __init__(self, *args, device: Optional[torch.device] = None, **kwargs):
-        """
-        Initialize the emulator with configuration parameters.
+    def __getitem__(self, key: Union[int, slice]) -> Union[int, bytes, List[int]]:
+        if isinstance(key, int):
+            return self.mem.read(key, key, 1, self.signed)
+        return self.mem.read(key.start, key.stop, key.step, self.signed)
 
-        Args
-        ----
-        `*args`: Variable length positional arguments passed to parent class and MarioKart_Memory.\n
-        `n_rays` (`int`): Number of rays for raycasting. Defaults to NUM_RAYS.\n
-        `has_grad` (`bool`): Whether to enable gradient computation. Defaults to False.\n
-        `max_dist` (`float`): Maximum distance for raycasting. Defaults to MAX_DIST.\n
-        `device` (`Optional[torch.device]`): The device to run computations on (cpu, cuda, or mps).
-        Defaults to cpu if None.\n
-        `**kwargs`: Variable length keyword arguments passed to parent class and MarioKart_Memory.
+    def __setitem__(self, key: Union[int, slice], value: Union[int, bytes, List[int]]):
+        if isinstance(key, int):
+            return self.mem.write(key, key, 1, bytes([value]))
+        return self.mem.write(key.start, key.stop, key.step, value)
 
-        Attributes
-        ----------
-        `device` (`torch.device`): The compute device for tensor operations.\n
-        `has_grad` (`bool`): Flag indicating gradient computation status.\n
-        `n_rays` (`int`): Number of raycasting rays.\n
-        `max_dist` (`float`): Maximum raycasting distance.\n
-        `count` (`int`): Frame counter, initialized to 0.
-        """
-        super().__init__(*args, **kwargs)
-        if device is None:
-            device = torch.device("cpu")
+    def read_byte(self, addr: int) -> int:
+        """Read a 1-byte size integer at the specified address."""
+        return self[addr]
 
-        self.device = device
-        self.count = 0
-        self._memory = DeSmuME_Memory(self, *args, device=device, **kwargs)
+    def read_short(self, addr: int) -> int:
+        """Read a 2-byte size integer at the specified address."""
+        return self[addr:addr:2]
+
+    def read_long(self, addr: int) -> int:
+        """Read a 2-byte size integer at the specified address."""
+        return self[addr:addr:4]
+
+
+class RegisterAccessor:
+    """
+    Access the registers of the emulator. The properties are the register names.
+    ``rX`` are the numbered register names, some registers are available via aliases.
+    Returned are integers.
+
+    You can also get a register value by accessing this object:
+
+    >>> DeSmuME().memory.register_arm9[0] == DeSmuME().memory.register_arm9.r0
+    <<< True
+
+    Should not be instantiated manually!
+
+    """
+    def __init__(self, prefix, mem: 'DeSmuME_Memory'):
+        self.prefix = prefix
+        self.lib = mem.emu.lib
+
+    # <editor-fold desc="register accessors" defaultstate="collapsed">
+
+    def __getitem__(self, item):
+        if item == 0:
+            return self.r0
+        if item == 1:
+            return self.r1
+        if item == 2:
+            return self.r2
+        if item == 3:
+            return self.r3
+        if item == 4:
+            return self.r4
+        if item == 5:
+            return self.r5
+        if item == 6:
+            return self.r6
+        if item == 7:
+            return self.r7
+        if item == 8:
+            return self.r8
+        if item == 9:
+            return self.r9
+        if item == 10:
+            return self.r10
+        if item == 11:
+            return self.r11
+        if item == 12:
+            return self.r12
+        if item == 13:
+            return self.r13
+        if item == 14:
+            return self.r14
+        if item == 15:
+            return self.r15
+        raise ValueError("Invalid register")
+
+    def __setitem__(self, item, value):
+        if item == 0:
+            self.r0 = value
+        if item == 1:
+            self.r1 = value
+        if item == 2:
+            self.r2 = value
+        if item == 3:
+            self.r3 = value
+        if item == 4:
+            self.r4 = value
+        if item == 5:
+            self.r5 = value
+        if item == 6:
+            self.r6 = value
+        if item == 7:
+            self.r7 = value
+        if item == 8:
+            self.r8 = value
+        if item == 9:
+            self.r9 = value
+        if item == 10:
+            self.r10 = value
+        if item == 11:
+            self.r11 = value
+        if item == 12:
+            self.r12 = value
+        if item == 13:
+            self.r13 = value
+        if item == 14:
+            self.r14 = value
+        if item == 15:
+            self.r15 = value
+        raise ValueError("Invalid register")
 
     @property
-    @override
-    def memory(self) -> DeSmuME_Memory:
+    def r0(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r0")))
+
+    @r0.setter
+    def r0(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r0")), value)
+
+    @property
+    def r1(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r1")))
+
+    @r1.setter
+    def r1(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r1")), value)
+
+    @property
+    def r2(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r2")))
+
+    @r2.setter
+    def r2(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r2")), value)
+
+    @property
+    def r3(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r3")))
+
+    @r3.setter
+    def r3(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r3")), value)
+
+    @property
+    def r4(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r4")))
+
+    @r4.setter
+    def r4(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r4")), value)
+
+    @property
+    def r5(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r5")))
+
+    @r5.setter
+    def r5(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r5")), value)
+
+    @property
+    def r6(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r6")))
+
+    @r6.setter
+    def r6(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r6")), value)
+
+    @property
+    def r7(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r7")))
+
+    @r7.setter
+    def r7(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r7")), value)
+
+    @property
+    def r8(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r8")))
+
+    @r8.setter
+    def r8(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r8")), value)
+
+    @property
+    def r9(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r9")))
+
+    @r9.setter
+    def r9(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r9")), value)
+
+    @property
+    def r10(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r10")))
+
+    @r10.setter
+    def r10(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r10")), value)
+
+    @property
+    def r11(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r11")))
+
+    @r11.setter
+    def r11(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r11")), value)
+
+    @property
+    def r12(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r12")))
+
+    @r12.setter
+    def r12(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r12")), value)
+
+    @property
+    def r13(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r13")))
+
+    @r13.setter
+    def r13(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r13")), value)
+
+    @property
+    def r14(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r14")))
+
+    @r14.setter
+    def r14(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r14")), value)
+
+    @property
+    def r15(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "r15")))
+
+    @r15.setter
+    def r15(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "r15")), value)
+
+    @property
+    def cpsr(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "cpsr")))
+
+    @cpsr.setter
+    def cpsr(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "cpsr")), value)
+
+    @property
+    def spsr(self):
+        return self.lib.desmume_memory_read_register(c_char_p(strbytes(self.prefix + "spsr")))
+
+    @spsr.setter
+    def spsr(self, value):
+        self.lib.desmume_memory_write_register(c_char_p(strbytes(self.prefix + "spsr")), value)
+
+    # Aliases
+    @property
+    def sp(self):
+        """Alias for r13."""
+        return self.r13
+
+    @sp.setter
+    def sp(self, value):
+        self.r13 = value
+
+    @property
+    def lr(self):
+        """Alias for r14."""
+        return self.r14
+
+    @lr.setter
+    def lr(self, value):
+        self.r14 = value
+
+    @property
+    def pc(self):
+        """Alias for r15."""
+        return self.r15
+
+    @pc.setter
+    def pc(self, value):
+        self.r15 = value
+
+    # </editor-fold>
+RegisterAccesor = RegisterAccessor  # Typo alias for backwards-comaptibility.
+
+
+class DeSmuME_Memory:
+    """Access and manipulate the memory of the emulator. Should not be instantiated manually!"""
+    def __init__(self, emu: 'DeSmuME'):
+        self.emu = emu
+        self._unsigned: MemoryAccessor = MemoryAccessor(False, self)
+        self._signed: MemoryAccessor = MemoryAccessor(True, self)
+        self._register_arm9: RegisterAccessor = RegisterAccessor("arm9.", self)
+        self._register_arm7: RegisterAccessor = RegisterAccessor("arm7.", self)
+
+        self.emu.lib.desmume_memory_read_byte.restype = c_uint8
+        self.emu.lib.desmume_memory_read_byte_signed.restype = c_int8
+        self.emu.lib.desmume_memory_read_short.restype = c_uint16
+        self.emu.lib.desmume_memory_read_short_signed.restype = c_int16
+        self.emu.lib.desmume_memory_read_long.restype = c_uint32
+        self.emu.lib.desmume_memory_read_long_signed.restype = c_int32
+
+        self.emu.lib.desmume_memory_write_byte.argtypes = [c_int, c_uint8]
+        self.emu.lib.desmume_memory_write_short.argtypes = [c_int, c_uint16]
+        self.emu.lib.desmume_memory_write_long.argtypes = [c_int, c_uint32]
+
+        self.emu.lib.desmume_memory_read_register.argtypes = [c_char_p]
+        self.emu.lib.desmume_memory_write_register.argtypes = [c_char_p, c_int]
+
+        # Used to make sure that callbacks aren't GCed.
+        # TODO: Some way to clean this up again.
+        self._registered_cbs = []
+
+    @property
+    def unsigned(self) -> MemoryAccessor:
+        """
+        The accessor for accessing the memory values as raw unsigned bytes/ints.
+
+        :type: MemoryAccessor
+        """
+        return self._unsigned
+
+    @property
+    def signed(self) -> MemoryAccessor:
+        """
+        The accessor for accessing the memory values as signed ints.
+
+        :type: MemoryAccessor
+        """
+        return self._signed
+
+    @property
+    def register_arm9(self) -> RegisterAccessor:
+        """
+        ARM9 Registers.
+
+        :type: RegisterAccessor
+        """
+        return self._register_arm9
+
+    @property
+    def register_arm7(self) -> RegisterAccessor:
+        """
+        ARM7 Registers.
+
+        :type: RegisterAccessor
+        """
+        return self._register_arm7
+
+    def read(self, start: int, end: int, size: int, signed: bool) -> Union[int, bytes, List[int]]:
+        """
+        Read part of NDS memory. You probably don't want to use this. Use the ``unsigned`` and ``signed``
+        properties instead.
+
+        Allowed sizes: 1 = byte, 2 = short, 4 = long
+
+        If start and end are equal, returns an integer based on the size and the signed flag.
+
+        If not, but size is 1 and signed is False, returns a bytes object with all bytes between start and end.
+        Otherwise returns a list of ints based on size and signed.
+        """
+        if size is None:
+            size = 1
+        if start == end:
+            # Read a single value, what kind depends on size
+            if signed:
+                if size == 1:
+                    return self.emu.lib.desmume_memory_read_byte_signed(start)
+                elif size == 2:
+                    return self.emu.lib.desmume_memory_read_short_signed(start)
+                elif size == 4:
+                    return self.emu.lib.desmume_memory_read_long_signed(start)
+            else:
+                if size == 1:
+                    return self.emu.lib.desmume_memory_read_byte(start)
+                elif size == 2:
+                    return self.emu.lib.desmume_memory_read_short(start)
+                elif size == 4:
+                    return self.emu.lib.desmume_memory_read_long(start)
+            raise ValueError("Invalid size.")
+        # Read a range.
+        if signed:
+            if size == 1:
+                b = []
+                for i, addr in enumerate(range(start, end, size)):
+                    b.append(self.emu.lib.desmume_memory_read_byte_signed(addr))
+            elif size == 2:
+                b = []
+                for i, addr in enumerate(range(start, end, size)):
+                    b.append(self.emu.lib.desmume_memory_read_short_signed(addr))
+            elif size == 4:
+                b = []
+                for i, addr in enumerate(range(start, end, size)):
+                    b.append(self.emu.lib.desmume_memory_read_long_signed(addr))
+            else:
+                raise ValueError("Invalid size.")
+        else:
+            if size == 1:
+                b = bytearray(int(end - start))
+                for i, addr in enumerate(range(start, end, size)):
+                    b[i] = self.emu.lib.desmume_memory_read_byte(addr)
+                b = bytes(b)
+            elif size == 2:
+                b = []
+                for i, addr in enumerate(range(start, end, size)):
+                    b.append(self.emu.lib.desmume_memory_read_short(addr))
+            elif size == 4:
+                b = []
+                for i, addr in enumerate(range(start, end, size)):
+                    b.append(self.emu.lib.desmume_memory_read_long(addr))
+            else:
+                raise ValueError("Invalid size.")
+        return b
+
+    def write(self, start: int, end: int, size: int, value: Union[bytes, List[int]]):
+        """
+        Write part of NDS memory. You probably don't want to use this. Use the ``unsigned`` and ``signed``
+        properties instead, or the ``write_*`` methods.
+        """
+        if start == end:
+            end += 1  # Write at least one.
+        if size == 1:
+            for i, addr in enumerate(range(start, end, size)):
+                self.emu.lib.desmume_memory_write_byte(addr, c_uint8(value[i]))
+        elif size == 2:
+            for i, addr in enumerate(range(start, end, size)):
+                # value must be List[int]
+                self.emu.lib.desmume_memory_write_short(addr, c_uint16(value[i]))
+        elif size == 4:
+            for i, addr in enumerate(range(start, end, size)):
+                # value must be List[int]
+                self.emu.lib.desmume_memory_write_long(addr, c_uint32(value[i]))
+        else:
+            raise ValueError("Invalid size.")
+
+    def read_string(self, address: int, codec='windows-1255'):
+        """Read a null-terminated string, beginning at address."""
+        max_len = 50
+        string_buff = bytearray(max_len)
+        cur_byte = self.unsigned.read_byte(address)
+        i = 0
+        while cur_byte != 0:
+            if i >= max_len:
+                max_len += 50
+                string_buff += bytearray(50)
+            string_buff[i] = cur_byte
+            i += 1
+            cur_byte = self.unsigned.read_byte(address + i)
+        return str(memoryview(string_buff)[:i], codec, 'ignore')
+
+    def write_byte(self, addr: int, value: int):
+        """Write a 1-byte integer to the memory at the specified address."""
+        self.write(addr, addr, 1, [value])
+
+    def write_short(self, addr: int, value: int):
+        """Write a 2-byte integer to the memory at the specified address."""
+        self.write(addr, addr, 2, [value])
+
+    def write_long(self, addr: int, value: int):
+        """Write a 4-byte integer to the memory at the specified address."""
+        self.write(addr, addr, 4, [value])
+
+    def get_next_instruction(self) -> int:
+        """Returns the next instruction to be executed by the ARM9 processor."""
+        return self.emu.lib.desmume_memory_get_next_instruction()
+
+    def set_next_instruction(self, address: int):
+        """
+        Sets the next instruction to be executed by the ARM9 processor.
+        You should probably also consider updating the PC.
+        """
+        self.emu.lib.desmume_memory_set_next_instruction(address)
+
+    def register_write(self, address: int, callback: Optional[MemoryCbFn], size=1):
+        """
+        Add a memory callback for when the memory at the specified address was changed.
+
+        Setting a callback will override the previously registered one for this address.
+        Set callback to None, to remove the callback for this address.
+
+        A usage example can be found for ``register_exec``.
+
+        :param address: The address to monitor.
+        :param callback: This callback will be called when the memory was written to. See ``MemoryCbFn``.
+        :param size: The maximum size that will be watched. If you set this to 4 for example,
+                     a range of (address, address + 3) will be monitored.
+        """
+        casted_cbfn = callback
+        if callback is not None:
+            casted_cbfn = MEMORY_CB_FN(callback)
+            self._registered_cbs.append(casted_cbfn)
+        self.emu.lib.desmume_memory_register_write(address, size, casted_cbfn)
+
+    def register_read(self, address: int, callback: Optional[MemoryCbFn], size=1):
+        """
+        Add a memory callback for when the memory at the specified address was read.
+
+        Setting a callback will override the previously registered one for this address.
+        Set callback to None, to remove the callback for this address.
+
+        A usage example can be found for ``register_exec``.
+
+        :param address: The address to monitor.
+        :param callback: This callback will be called when the memory was read. See ``MemoryCbFn``.
+        :param size: The maximum size that will be watched. If you set this to 4 for example,
+                     a range of (address, address + 3) will be monitored.
+        """
+        casted_cbfn = callback
+        if callback is not None:
+            casted_cbfn = MEMORY_CB_FN(callback)
+            self._registered_cbs.append(casted_cbfn)
+        self.emu.lib.desmume_memory_register_read(address, size, casted_cbfn)
+
+    def register_exec(self, address: int, callback: Optional[MemoryCbFn], size=2):
+        """
+        Add a memory callback for when the PC processed the operation at the specified address.
+
+        Setting a callback will override the previously registered one for this address.
+        Set callback to None, to remove the callback for this address.
+
+        Example (will print 'Hello World', whenever the PC executes the code at 0x022f8818):
+
+        >>> def my_callback(address, size):
+        >>>     print("Hello World!")
+        >>>
+        >>> DeSmuME().memory.register_exec(0x022f8818, my_callback)
+
+        :param address: The address to monitor.
+        :param callback: This callback will be called when the operation was executed. See ``MemoryCbFn``.
+        :param size: Leave this at 2.
+        """
+        casted_cbfn = callback
+        if callback is not None:
+            casted_cbfn = MEMORY_CB_FN(callback)
+            self._registered_cbs.append(casted_cbfn)
+        self.emu.lib.desmume_memory_register_exec(address, size, casted_cbfn)
+
+
+class DeSmuME:
+    """DeSmuME, the Nintendo DS emulator."""
+    def __init__(self, dl_name: str = None):
+        """
+        Initializes a new emulator instance.
+        A path to the shard library for DeSmuME can be passed, if not it will be auto-detected.
+        """
+        self.lib = None
+
+        # Load the correct library
+        if dl_name is None:
+            # Try autodetect / CWD
+            try:
+                if platform.system().lower().startswith('windows'):
+                    dl_name = "libdesmume.dll"
+                    os.add_dll_directory(os.getcwd())
+                elif platform.system().lower().startswith('linux'):
+                    dl_name = "libdesmume.so"
+                elif platform.system().lower().startswith('darwin'):
+                    dl_name = "libdesmume.dylib"
+                else:
+                    RuntimeError(f"Unknown platform {platform.system()}, can't autodetect DLL to load.")
+
+                self.lib = cdll.LoadLibrary(dl_name)
+            except OSError:
+                # Okay now try the package directory
+                dl_name = os.path.dirname(os.path.realpath(__file__))
+                if platform.system().lower().startswith('windows'):
+                    os.add_dll_directory(dl_name)
+                    dl_name = os.path.join(dl_name, "libdesmume.dll")
+                elif platform.system().lower().startswith('linux'):
+                    dl_name = os.path.join(dl_name, "libdesmume.so")
+                elif platform.system().lower().startswith('darwin'):
+                    dl_name = os.path.join(dl_name, "libdesmume.dylib")
+
+                self.lib = cdll.LoadLibrary(dl_name)
+        else:
+            if platform.system().lower().startswith('windows'):
+                os.add_dll_directory(os.path.dirname(dl_name))
+                dl_name = os.path.basename(dl_name)
+
+            self.lib = cdll.LoadLibrary(dl_name)
+
+        self.lib.desmume_set_savetype(0)
+
+        if self.lib.desmume_init() < 0:
+            raise RuntimeError("Failed to init DeSmuME")
+
+        self._input = DeSmuME_Input(self)
+        self._savestate = DeSmuME_Savestate(self)
+        self._backup = DeSmuME_Backup(self)
+        self._movie = DeSmuME_Movie(self)
+        self._memory = DeSmuME_Memory(self)
+        self._sdl_window = None
+        self._raw_buffer_rgbx = None
+
+    def __del__(self):
+        if self.lib is not None:
+            self.lib.desmume_free()
+            self._input.__del__()
+            if self._sdl_window:
+                self._sdl_window.__del__()
+            self.lib = None
+
+    def destroy(self):
+        """Destroy the emulator and free memory. Calling any method after this WILL result in a crash."""
+        self.__del__()
+
+    @property
+    def input(self):
+        """
+        Keyboard and joystick configuration.
+
+        :type: DeSmuME_Input
+        """
+        return self._input
+
+    @property
+    def savestate(self):
+        """
+        Loading and saving savestates.
+
+        :type: DeSmuME_Savestate
+        """
+        return self._savestate
+
+    @property
+    def backup(self) -> DeSmuME_Backup:
+        """Battery save (backup memory) import/export."""
+        return self._backup
+
+    @property
+    def movie(self):
+        """
+        Recording and playing back movies.
+
+        :type: DeSmuME_Movie
+        """
+        return self._movie
+
+    @property
+    def memory(self):
+        """
+        Accessing and manipulating the memory.
+
+        :type: DeSmuME_Memory
+        """
         return self._memory
 
-    @override
+    def set_language(self, lang: Language):
+        """Set the current firmware language."""
+        self.lib.desmume_set_language(lang.value)
+
+    def open(self, file_name: str, auto_resume=True):
+        """
+        Open a ROM by file name.
+
+        If ``auto_resume`` is True, the emulator will automatically begin emulating the game.
+        Otherwise the emulator is paused and you may call ``resume`` to unpause it.
+        """
+        if self.lib.desmume_open(c_char_p(strbytes(file_name))) < 0:
+            raise RuntimeError("Unable to open ROM file.")
+        if auto_resume:
+            self.resume()
+
+    def close(self):
+        """
+        Close a previously opened ROM, freeing up memory.
+        You don't need to call this before opening a new ROM (it is done automatically).
+        """
+        self.lib.desmume_close()
+
+    def set_savetype(self, value: int):
+        """
+        Set the type of the SRAM. Please see the DeSmuME documentation for possible values.
+        0 is auto-detect and set by default.
+        """
+        # TODO: Enum?
+        self.lib.desmume_set_savetype(value)
+
+    def pause(self):
+        """Pause the emulator."""
+        self.lib.desmume_pause()
+
+    def resume(self, keep_keypad=False):
+        """
+        Resume / unpause the emulator. This will reset the keypad (release all keys),
+        except if ``keep_keypad`` is provided.
+        """
+        if keep_keypad:
+            self.input.keypad_update(0)
+        self.lib.desmume_resume()
+
     def reset(self):
-        super().reset()
-        self.memory.reset()
+        """Resets the emulator / restarts the current game."""
+        self.lib.desmume_reset()
+
+    def is_running(self) -> bool:
+        """Returns ``True``, if a game is loaded and the emulator is running (not paused)."""
+        return bool(self.lib.desmume_running())
+
+    def skip_next_frame(self):
+        """Tell the emulator to skip the next frame."""
+        self.lib.desmume_skip_next_frame()
+
+    def cycle(self, with_joystick=True):
+        """
+        Cycle one game cycle / frame. Set ``with_joystick`` to
+        ``False``, if joystick processing was not initialized.
+        """
+        self.lib.desmume_cycle(with_joystick)
+
+    def has_opengl(self) -> bool:
+        """Returns ``True``, if OpenGL is available for rendering."""
+        return bool(self.lib.desmume_has_opengl())
+
+    def create_sdl_window(self, auto_pause=False, use_opengl_if_possible=True) -> DeSmuME_SDL_Window:
+        """
+        Create an SDL window for drawing the
+        emulator in and processing inputs.
+
+        :param auto_pause: Whether or not "tabbing out" of the window pauses the game.
+        :param use_opengl_if_possible: Whether or not to use OpenGL for rendering, if available.
+
+        """
+        if not self._sdl_window:
+            self._sdl_window = DeSmuME_SDL_Window(self, auto_pause, use_opengl_if_possible)
+        return self._sdl_window
+
+    def display_buffer(self):
+        """Return the display buffer in the internal format. You probably want to use display_buffer_as_rgbx instead."""
+        self.lib.desmume_draw_raw.restype = POINTER(c_uint16)
+        return self.lib.desmume_draw_raw()
+
+    def display_buffer_as_rgbx(self, reuse_buffer=True) -> memoryview:
+        """
+        Return the display buffer as RGBX color values,
+        see the screen size constants for how many pixels make up lines.
+        """
+        if reuse_buffer:
+            if not self._raw_buffer_rgbx:
+                self._raw_buffer_rgbx = create_string_buffer(SCREEN_WIDTH * SCREEN_HEIGHT_BOTH * 4)
+            buff = self._raw_buffer_rgbx
+        else:
+            buff = create_string_buffer(SCREEN_WIDTH * SCREEN_HEIGHT_BOTH * 4)
+        self.lib.desmume_draw_raw_as_rgbx(cast(buff, c_char_p))
+        # XXX: Yes this is stupid, but cairo NEEDS a bytearray....
+        return memoryview(bytearray(buff.raw))
+
+    def screenshot(self) -> Image.Image:
+        """Convert the current display buffer into a PIL image."""
+        buff = create_string_buffer(SCREEN_WIDTH * SCREEN_HEIGHT_BOTH * 3)
+        self.lib.desmume_screenshot(cast(buff, c_char_p))
+
+        return Image.frombuffer('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT_BOTH), buff.raw, 'raw', 'RGB', 0, 1)
+
+    def get_ticks(self) -> int:
+        """Get the current SDL tick number."""
+        return self.lib.desmume_sdl_get_ticks()
+
+    def volume_get(self) -> int:
+        """Get the current value (between 0 - 100)."""
+        return self.lib.desmume_volume_get()
+
+    def volume_set(self, volume: int):
+        """Set the current value (to a value between 0 - 100)."""
+        return self.lib.desmume_volume_set(volume)
+
+    def gpu_get_layer_main_enable_state(self, layer_index: int):
+        """Get the current display status of the specified layer on the main GPU."""
+        return bool(self.lib.desmume_gpu_get_layer_main_enable_state(layer_index))
+
+    def gpu_get_layer_sub_enable_state(self, layer_index: int):
+        """Get the current display status of the specified layer on the sub GPU."""
+        return bool(self.lib.desmume_gpu_get_layer_sub_enable_state(layer_index))
+
+    def gpu_set_layer_main_enable_state(self, layer_index: int, state: bool):
+        """Set the current display status of the specified layer on the main GPU."""
+        self.lib.desmume_gpu_set_layer_main_enable_state(layer_index, state)
+
+    def gpu_set_layer_sub_enable_state(self, layer_index: int, state: bool):
+        """Set the current display status of the specified layer on the sub GPU."""
+        self.lib.desmume_gpu_set_layer_sub_enable_state(layer_index, state)

@@ -118,3 +118,4 @@ _riptide/
 
 # setup.py build dir
 __build_desmume/
+desmume/libdesmume.dylib
