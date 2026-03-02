@@ -37,8 +37,12 @@ from desmume.mkds import (
     COLLISION_DATA_ADDR,
     FX32_SCALE_FACTOR,
 )
-from src.utils.vector import *
-from io import BufferedWriter, BytesIO, TextIOWrapper
+from desmume.vector import (
+    ray_triangle_intersection,
+    ray_line_intersection,
+    generate_plane_vectors,
+)
+
 
 class OctreeNode(ctypes.LittleEndianStructure):
     _fields_ = [
@@ -152,6 +156,7 @@ def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
 def _pack_i4_fx32(arr):
     repacked = structured_to_unstructured(arr, dtype=np.float32)
     return repacked / (1 << 12)
+
 
 vmap_over_triangles = torch.vmap(
     ray_triangle_intersection, in_dims=(0, None, None, None, None)
@@ -885,7 +890,7 @@ class DeSmuME_Memory(_DeSmuME_Memory):
         pxz_1, pxz_2 = checkpoint[:, mask_xz].chunk(2, dim=0)
         pxz_1 = pxz_1.squeeze(0)
         pxz_2 = pxz_2.squeeze(0)
-        intersect, _ = intersect_ray_line_2d(pos_xz, dir_xz, pxz_1, pxz_2)
+        intersect, _ = ray_line_intersection(pos_xz, dir_xz, pxz_1, pxz_2)
         intersect = torch.tensor(
             [intersect[0], position[1], intersect[1]], device=device
         )
@@ -980,9 +985,7 @@ class DeSmuME(_DeSmuME):
     ```
     """
 
-    def __init__(
-        self, *args, device: Optional[torch.device] = None, **kwargs
-    ):
+    def __init__(self, *args, device: Optional[torch.device] = None, **kwargs):
         """
         Initialize the emulator with configuration parameters.
 

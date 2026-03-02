@@ -14,7 +14,7 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with py-desmume.  If not, see <https://www.gnu.org/licenses/>.
-__version__ = '0.0.9'
+__version__ = '0.0.11'
 from setuptools import setup, find_packages
 
 from setuptools.command.build_ext import build_ext
@@ -151,7 +151,7 @@ setup(
     description='Python library to interface with DeSmuME, the Nintendo DS emulator + sample GTK-based frontend',
     long_description=long_description,
     long_description_content_type='text/x-rst',
-    url='https://github.com/blayyyyyk/py-desmume',
+    url='https://github.com/blayyyyyk/py-desmume-mkds',
     python_requires=">=3.7",
     install_requires=[
         'Pillow == 11.0.0',
