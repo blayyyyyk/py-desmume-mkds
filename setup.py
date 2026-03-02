@@ -14,7 +14,7 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with py-desmume.  If not, see <https://www.gnu.org/licenses/>.
-__version__ = '0.0.13'
+__version__ = '0.0.14'
 from setuptools import setup, find_packages
 
 from setuptools.command.build_ext import build_ext
@@ -92,6 +92,10 @@ class BuildExt(build_ext):
                 self.build_lib, 'desmume',
                 os.path.basename(library)
             )
+            
+            # Ensure the destination directory exists
+            os.makedirs(os.path.dirname(build_target), exist_ok=True)
+            
             print(f"Copying {library} -> {build_target}")
             shutil.copyfile(library, build_target)
 

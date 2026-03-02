@@ -982,7 +982,7 @@ class MarioKart(DeSmuME):
     ```
     """
 
-    def __init__(self, *args, device: Optional[torch.device] = None, **kwargs):
+    def __init__(self, *args, max_dist: int, n_rays: int, device: Optional[torch.device] = None, **kwargs):
         """
         Initialize the emulator with configuration parameters.
 
@@ -1010,6 +1010,8 @@ class MarioKart(DeSmuME):
 
         self.device = device
         self.count = 0
+        self.max_dist = max_dist
+        self.n_rays = n_rays
         self._memory = MarioKart_Memory(self, *args, device=device, **kwargs)
 
     @property
