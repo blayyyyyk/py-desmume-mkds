@@ -1,4 +1,4 @@
-from demsume.mkds.stubgen_out import *
+from desmume.mkds.stubgen_out import *
 
 RACER_PTR_ADDR: int = 0x0217ACF8
 COURSE_ID_ADDR: int = 0x23CDCD8

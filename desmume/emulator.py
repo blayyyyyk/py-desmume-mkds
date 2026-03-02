@@ -1,8 +1,8 @@
 import ctypes, torch, numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import NDArray
-from desmume.emulator import *
-from desmume.emulator import DeSmuME as _DeSmuME, DeSmuME_Memory as _DeSmuME_Memory
+from desmume._emulator import SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT_BOTH
+from desmume._emulator import DeSmuME as _DeSmuME, DeSmuME_Memory as _DeSmuME_Memory
 from typing import (
     Any,
     Type,
@@ -17,7 +17,7 @@ from typing import (
 )
 from typing import Annotated, Literal
 from typing_extensions import override
-from desmume.mkds import (
+from desmume.mkds.mkds import (
     VecFx32,
     VecFx16,
     camera_t,
