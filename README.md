@@ -1,7 +1,3 @@
-Here is a detailed `README.md` for your fork that focuses extensively on the new internal mechanics, direct memory access, and `ctypes` integration.
-
----
-
 # py-desmume-mkds
 
 A Python library for the DeSmuME Nintendo DS emulator, enhanced with deep memory introspection, PyTorch integration, and 3D environment analysis specifically tailored for Mario Kart DS.
