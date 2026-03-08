@@ -1,6 +1,6 @@
-.. title:: py-desmume
+.. title:: py-desmume-mkds
 
-.. include:: ../README.rst
+.. include:: ../README.md
 
 .. toctree::
    :maxdepth: 3

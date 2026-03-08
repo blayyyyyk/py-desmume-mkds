@@ -14,7 +14,7 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with py-desmume.  If not, see <https://www.gnu.org/licenses/>.
-__version__ = '0.0.15'
+__version__ = '0.0.16'
 from setuptools import setup, find_packages
 
 from setuptools.command.build_ext import build_ext
@@ -32,7 +32,7 @@ from glob import glob
 # README read-in
 from os import path
 this_directory = path.abspath(path.dirname(__file__))
-with open(path.join(this_directory, 'README.rst'), encoding='utf-8') as f:
+with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 # END README read-in
 

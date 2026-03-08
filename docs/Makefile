@@ -21,3 +21,4 @@ help:
 apidocs:
 	rm -rf "$(SOURCEDIR)/api_docs"
 	sphinx-apidoc -e -o "$(SOURCEDIR)/api_docs/" -H "API Documentation" ../desmume ../**/frontend/* ../**/frontend/**/*
+	sphinx-apidoc -e -o "$(SOURCEDIR)/api_docs/mkds" -H "C Types API Documentation" ../desmume/mkds

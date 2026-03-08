@@ -19,15 +19,22 @@
 
 # -- Project information -----------------------------------------------------
 import sys, os
+import desmume.mkds.codegen_out
 
-project = 'py-desmume'
+# Wipe the runtime annotations so Sphinx is forced to use the .pyi file
+for name, obj in vars(desmume.mkds.codegen_out).items():
+    if hasattr(obj, '__annotations__'):
+        obj.__annotations__ = {}
+
+project = 'py-desmume-mkds'
 copyright = '2024, Marco "Capypara" Köpcke'
-author = 'Marco "Capypara" Köpcke'
+author = 'Blake Moody'
 
 # The short X.Y version
 version = ''
 # The full version, including alpha/beta/rc tags
 release = ''
+
 
 
 # -- General configuration ---------------------------------------------------
@@ -43,7 +50,8 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.todo',
     'sphinx.ext.imgmath',
-    'sphinx.ext.viewcode'
+    'sphinx.ext.viewcode',
+    'sphinx_autodoc_typehints'
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -52,8 +60,8 @@ templates_path = ['_templates']
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 #
-# source_suffix = ['.rst', '.md']
-source_suffix = '.rst'
+source_suffix = ['.rst', '.md']
+# source_suffix = '.rst'
 
 # The master toctree document.
 master_doc = 'index'
@@ -71,7 +79,8 @@ language = None
 exclude_patterns = []
 
 # The name of the Pygments (syntax highlighting) style to use.
-pygments_style = None
+pygments_style = "everforest-light"
+pygments_dark_style = "everforest-dark"
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -79,7 +88,7 @@ pygments_style = None
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "furo"
+html_theme = "shibuya"
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -90,7 +99,13 @@ html_theme = "furo"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = []
+# Point to the directory containing your custom.css
+html_static_path = ['_static']
+
+# Tell Sphinx to apply the custom CSS file
+html_css_files = [
+    'custom.css',
+]
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.

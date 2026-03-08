@@ -1,0 +1,60 @@
+html.dark {
+    /* Everforest Dark (Medium) */
+    --sy-c-background: #2D353B;      /* bg0 */
+    --sy-c-text: #D3C6AA;            /* fg */
+    --sy-c-light: #859289;           /* grey1 */
+    --sy-c-bold: #DBBC7F;            /* yellow */
+    --sy-c-heading: #A7C080;         /* green */
+    --sy-c-link: #7FBBB3;            /* blue */
+    --sy-c-link-hover: #83C092;      /* aqua */
+    --sy-c-divider: #475258;         /* bg3 */
+    --sy-c-border: #3D484D;          /* bg2 */
+    --sy-c-foot-text: #9DA9A0;       /* grey2 */
+    --sy-c-foot-background: #232A2E; /* bg_dim */
+    --sy-c-foot-divider: #343F44;    /* bg1 */
+    
+    /* Shibuya Accent Override (Everforest Green) */
+    --accent-9: #A7C080;
+}
+
+html.light {
+    /* Everforest Light (Medium) */
+    --sy-c-background: #F9F3DF;
+    --sy-c-text: #4F5B62;
+    --sy-c-light: #859289;
+    --sy-c-bold: #8C5A00;
+    --sy-c-heading: #47661B;
+    --sy-c-link: #2E7099;
+    --sy-c-link-hover: #2C7459;
+    --sy-c-divider: #E1D4BA;
+    --sy-c-border: #E8DFD6;
+    --sy-c-foot-text: #829181;
+    --sy-c-foot-background: #F3EBD2;
+    --sy-c-foot-divider: #E1D4BA;
+    
+    --accent-9: #47661B;
+}
+
+/* Method and Class Names (Everforest Green) */
+html.dark .sig-name, html.dark .descname {
+    color: #A7C080 !important;
+}
+html.light .sig-name, html.light .descname {
+    color: #47661B !important;
+}
+
+/* Function Parameters (Everforest Yellow) */
+html.dark .sig-param {
+    color: #DBBC7F !important;
+}
+html.light .sig-param {
+    color: #8C5A00 !important;
+}
+
+/* "class", "def", and "property" keywords (Everforest Red) */
+html.dark .property {
+    color: #E67E80 !important;
+}
+html.light .property {
+    color: #E66868 !important;
+}
