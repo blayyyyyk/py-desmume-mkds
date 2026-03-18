@@ -7,7 +7,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   desmume.mkds.codegen_out
    desmume.mkds.mkds
 
 Module contents

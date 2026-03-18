@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 
 def ray_triangle_intersection(
@@ -97,8 +98,8 @@ def ray_line_intersection(O, D, P1, P2, eps=1e-8):
 def generate_plane_vectors(
     n_rays: int,
     sweep_angle_deg: float,
-    rotation_matrix: torch.Tensor,
-    origin: torch.Tensor,
+    rotation_matrix: np.ndarray,
+    origin: np.ndarray,
     plane_indices: tuple[int, int] = (2, 0),  # Default: Forward (Z) to Right (X)
 ):
     """
@@ -122,13 +123,12 @@ def generate_plane_vectors(
     """
     # 1. Handle Batching
     # If input is unbatched (3,3), unsqueeze to (1,3,3) for uniform logic
-    is_batched = rotation_matrix.dim() == 3
+    is_batched = rotation_matrix.ndim == 3
     if not is_batched:
-        rotation_matrix = rotation_matrix.unsqueeze(0)
-        origin = origin.unsqueeze(0)
+        rotation_matrix = rotation_matrix[None, ...]
+        origin = origin[None, ...]
 
     B = rotation_matrix.shape[0]
-    device = rotation_matrix.device
 
     # 2. Extract Basis Vectors from Matrix Columns
     # R[:, :, i] grabs the i-th column (the i-th basis vector)
@@ -140,30 +140,30 @@ def generate_plane_vectors(
 
     # 3. Generate Angles
     half_sweep = sweep_angle_deg / 2.0
-    angles = torch.linspace(-half_sweep, half_sweep, n_rays, device=device)
-    rads = torch.deg2rad(angles)
+    angles = np.linspace(-half_sweep, half_sweep, n_rays)
+    rads = np.deg2rad(angles)
 
     # 4. Reshape for Broadcasting
     # We want: (B, 1, 3) * (1, N, 1) -> (B, N, 3)
 
     # Basis vectors: (B, 1, 3)
-    vec_center = vec_center.unsqueeze(1)
-    vec_side = vec_side.unsqueeze(1)
+    vec_center = vec_center[:, None, ...]
+    vec_side = vec_side[:, None, ...]
 
     # Trig values: (1, N, 1)
-    cos_t = torch.cos(rads).view(1, n_rays, 1)
-    sin_t = torch.sin(rads).view(1, n_rays, 1)
+    cos_t = np.cos(rads).reshape(1, n_rays, 1)
+    sin_t = np.sin(rads).reshape(1, n_rays, 1)
 
     # 5. Linear Combination (The Sweep)
     # v = Center * cos(t) + Side * sin(t)
     directions = (vec_center * cos_t) + (vec_side * sin_t)
 
     # Normalize (just in case floating point drift occurred)
-    directions = directions / (torch.norm(directions, dim=-1, keepdim=True) + 1e-8)
+    directions = directions / (np.linalg.norm(directions, axis=-1, keepdims=True) + 1e-8)
 
     # 6. Expand Origins
     # Origin (B, 3) -> (B, N, 3)
-    origins = origin.unsqueeze(1).expand(-1, n_rays, -1)
+    origins = origin[:, None, ...].repeat(n_rays, axis=1)
 
     # 7. Remove batch dim if input was single
     if not is_batched:

@@ -19,12 +19,7 @@
 
 # -- Project information -----------------------------------------------------
 import sys, os
-import desmume.mkds.codegen_out
 
-# Wipe the runtime annotations so Sphinx is forced to use the .pyi file
-for name, obj in vars(desmume.mkds.codegen_out).items():
-    if hasattr(obj, '__annotations__'):
-        obj.__annotations__ = {}
 
 project = 'py-desmume-mkds'
 copyright = '2024, Marco "Capypara" Köpcke'

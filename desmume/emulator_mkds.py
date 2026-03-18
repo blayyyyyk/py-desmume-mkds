@@ -1,46 +1,62 @@
-import ctypes, torch, numpy as np
+import ctypes
+from functools import cache, cached_property, reduce
+from typing import (
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    Optional,
+    Type,
+    TypedDict,
+    TypeVar,
+    Union,
+)
+from typing import cast as t_cast
+
+import numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import NDArray
+from typing_extensions import overload, override
+
 from desmume.emulator import *
-from typing import (
-    Any,
-    Type,
-    TypeVar,
-    cast,
-    Union,
-    TypedDict,
-    Literal,
-    Generic,
-    cast,
-    Optional,
-)
-from typing import Annotated, Literal
-from typing_extensions import override
 from desmume.mkds.mkds import (
-    VecFx32,
-    VecFx16,
-    camera_t,
-    driver_t,
-    race_state_t,
-    race_status_t,
-    mdat_mapdata_t,
-    kcol_header_t,
-    struct_kcol_prism_data_t,
-    struct_nkm_cpoi_entry_t,
-    struct_race_driver_status_t,
-    RACER_PTR_ADDR,
     CAMERA_PTR_ADDR,
-    RACE_STATE_PTR_ADDR,
-    RACE_STATUS_PTR_ADDR,
-    MAP_DATA_PTR_ADDR,
     COLLISION_DATA_ADDR,
     FX32_SCALE_FACTOR,
+    MAP_DATA_PTR_ADDR,
+    RACE_STATE_PTR_ADDR,
+    RACE_STATUS_PTR_ADDR,
+    RACER_PTR_ADDR,
+    VecFx16,
+    VecFx32,
+    camera_t,
+    driver_t,
+    fx32,
+    kcol_header_t,
+    mdat_mapdata_t,
+    quaternion_t,
+    race_state_t,
+    race_status_t,
+    struct_kcol_header_t,
+    struct_kcol_prism_data_t,
+    struct_nkm_cpoi_entry_t,
+    struct_nkm_stag_data_t,
+    struct_nkm_stag_t,
+    struct_quaternion_t,
+    struct_race_driver_status_t,
+    struct_race_status_t,
+    struct_VecFx16,
+    struct_VecFx32,
+    union_MtxFx22,
+    union_MtxFx33,
+    union_MtxFx43,
 )
 from desmume.vector import (
-    ray_triangle_intersection,
-    ray_line_intersection,
     generate_plane_vectors,
+    ray_line_intersection,
+    ray_triangle_intersection,
 )
+
 
 class OctreeNode(ctypes.LittleEndianStructure):
     _fields_ = [
@@ -60,43 +76,6 @@ class MMUPrefix(ctypes.Structure):
     ]
 
 
-class NDSDisplayInfo(ctypes.Structure):
-    _fields_ = [
-        # --- User-requested settings ---
-        ("colorFormat", ctypes.c_int),  # NDSColorFormat (enum)
-        ("pixelBytes", ctypes.c_uint32),  # u32
-        ("isCustomSizeRequested", ctypes.c_bool),  # bool
-        # Note: Compiler likely adds padding here for alignment
-        ("customWidth", ctypes.c_uint32),  # u32
-        ("customHeight", ctypes.c_uint32),  # u32
-        ("framebufferPageSize", ctypes.c_uint32),  # u32
-        ("framebufferPageCount", ctypes.c_uint32),  # u32
-        ("masterFramebufferHead", ctypes.c_void_p),  # void *
-        ("isDisplayEnabled", ctypes.c_bool * 2),  # bool[2]
-        # --- Frame render state information ---
-        ("bufferIndex", ctypes.c_uint8),  # u8
-        # Note: Compiler likely adds 7 bytes of padding here to align the next u64
-        ("sequenceNumber", ctypes.c_uint64),  # u64
-        ("masterNativeBuffer16", ctypes.POINTER(ctypes.c_uint16)),  # u16 *
-        ("masterCustomBuffer", ctypes.c_void_p),  # void *
-        ("nativeBuffer16", ctypes.POINTER(ctypes.c_uint16) * 2),  # u16 *[2]
-        ("customBuffer", ctypes.c_void_p * 2),  # void *[2]
-        ("renderedWidth", ctypes.c_uint32 * 2),  # u32[2]
-        ("renderedHeight", ctypes.c_uint32 * 2),  # u32[2]
-        ("renderedBuffer", ctypes.c_void_p * 2),  # void *[2]
-        ("engineID", ctypes.c_int * 2),  # GPUEngineID (enum)[2]
-        ("didPerformCustomRender", ctypes.c_bool * 2),  # bool[2]
-        ("masterBrightnessDiffersPerLine", ctypes.c_bool * 2),  # bool[2]
-        # 2D arrays: [2][192]
-        ("masterBrightnessMode", (ctypes.c_uint8 * SCREEN_HEIGHT) * 2),
-        ("masterBrightnessIntensity", (ctypes.c_uint8 * SCREEN_HEIGHT) * 2),
-        ("backlightIntensity", ctypes.c_float * 2),  # float[2]
-        # --- Postprocessing information ---
-        ("needConvertColorFormat", ctypes.c_bool * 2),  # bool[2]
-        ("needApplyMasterBrightness", ctypes.c_bool * 2),  # bool[2]
-    ]
-
-
 T = TypeVar("T", bound=Union[ctypes.Structure, ctypes.Array])
 H = TypeVar("H", bound=ctypes.Structure)
 
@@ -113,6 +92,61 @@ _PrismEntriesAttributes = TypedDict(
         "is_floor": np.ndarray,
     },
 )
+
+
+MtxLike = Union[union_MtxFx22, union_MtxFx33, union_MtxFx43]
+VecLike = Union[struct_VecFx16, struct_VecFx32, VecFx16, VecFx32, quaternion_t, struct_quaternion_t]
+
+@overload
+def _unpack_struct_fx(struct: union_MtxFx22) -> np.ndarray[tuple[Literal[2], Literal[2]], np.dtype[np.float32]]: ...
+
+@overload
+def _unpack_struct_fx(struct: union_MtxFx33) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]: ...
+
+@overload
+def _unpack_struct_fx(struct: union_MtxFx43) -> np.ndarray[tuple[Literal[4], Literal[3]], np.dtype[np.float32]]: ...
+
+@overload
+def _unpack_struct_fx(struct: struct_VecFx16 | VecFx16) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]: ...
+
+@overload
+def _unpack_struct_fx(struct: struct_VecFx32 | VecFx32) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]: ...
+
+@overload
+def _unpack_struct_fx(struct: struct_quaternion_t | quaternion_t) -> np.ndarray[tuple[Literal[4]], np.dtype[np.float32]]: ...
+
+def _unpack_struct_fx(struct: MtxLike | VecLike):
+    c_dtype = None
+    if isinstance(struct, union_MtxFx22):
+        shape = (2, 2)
+    elif isinstance(struct, union_MtxFx33):
+        shape = (3, 3)
+    elif isinstance(struct, union_MtxFx43):
+        shape = (4, 3)
+    elif isinstance(struct, (struct_VecFx16, VecFx16)):
+        shape = (3,)
+    elif isinstance(struct, (struct_VecFx32, VecFx32)):
+        shape = (3,)
+    elif isinstance(struct, (struct_quaternion_t, quaternion_t)):
+        shape = (4,)
+
+    if isinstance(struct, (union_MtxFx22, union_MtxFx33, union_MtxFx43, struct_VecFx32, VecFx32, struct_quaternion_t, quaternion_t)):
+        c_dtype = ctypes.c_int32
+    elif isinstance(struct, (struct_VecFx16, VecFx16)):
+        c_dtype = ctypes.c_int16
+
+    array_struct = c_dtype * reduce(lambda x, y: x * y, shape)
+    if isinstance(struct, (union_MtxFx22, union_MtxFx33, union_MtxFx43)):
+        array = t_cast(ctypes.Array[ctypes.c_int32], struct.a)
+    elif isinstance(struct, (struct_VecFx16, VecFx16, struct_VecFx32, VecFx32, struct_quaternion_t, quaternion_t)):
+        array = array_struct.from_buffer(struct)
+
+    if c_dtype == ctypes.c_int16:
+        out_mtx = np.frombuffer(array, dtype=np.int16)
+    else:
+        out_mtx = np.frombuffer(array, dtype=np.int32)
+
+    return out_mtx.astype(np.float32).reshape(*shape)
 
 
 def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
@@ -148,19 +182,12 @@ def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
     result["is_wall"] = (raw_attrs >> 14) & 0x1
     result["is_floor"] = (raw_attrs >> 15) & 0x1
 
-    return cast(_PrismEntriesAttributes, result)
+    return t_cast(_PrismEntriesAttributes, result)
 
 
 def _pack_i4_fx32(arr):
     repacked = structured_to_unstructured(arr, dtype=np.float32)
     return repacked / (1 << 12)
-
-
-vmap_over_triangles = torch.vmap(
-    ray_triangle_intersection, in_dims=(0, None, None, None, None)
-)
-
-vmap_all_pairs = torch.vmap(vmap_over_triangles, in_dims=(None, 0, 0, None, None))
 
 _PrismEntries = TypedDict(
     "_PrismEntries",
@@ -184,23 +211,22 @@ _CollisionEntries = TypedDict(
     },
 )
 _TriangleVertices = TypedDict(
-    "_TriangleVertices", {"v1": torch.Tensor, "v2": torch.Tensor, "v3": torch.Tensor}
+    "_TriangleVertices", {"v1": np.ndarray, "v2": np.ndarray, "v3": np.ndarray}
 )
 _CheckpointPos = TypedDict(
     "_CheckpointPos",
     {
         "current_checkpoint_id": int,
-        "current_checkpoint_pos": torch.Tensor,
+        "current_checkpoint_pos": np.ndarray,
         "next_checkpoint_id": int,
-        "next_checkpoint_pos": torch.Tensor,
+        "next_checkpoint_pos": np.ndarray,
     },
 )
-_CheckpointAngle = TypedDict("_CheckpointAngle", {"midpoint_angle": torch.Tensor})
+_CheckpointAngle = TypedDict("_CheckpointAngle", {"midpoint_angle": np.ndarray})
 RayCastInfo = TypedDict(
     "RayCastInfo",
-    {"distance": torch.Tensor, "position": torch.Tensor, "mask": torch.Tensor},
+    {"distance": np.ndarray, "position": np.ndarray, "mask": np.ndarray},
 )
-
 
 class CheckpointInfo(_CheckpointPos, _CheckpointAngle):
     pass
@@ -259,7 +285,7 @@ class MarioKart_Memory(DeSmuME_Memory):
     `get_torch_device`: Retrieve the current target device.
     """
 
-    def __init__(self, *args, device: torch.device, **kwargs) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         """
         Initialize the emulator with memory access and state management.
 
@@ -289,15 +315,8 @@ class MarioKart_Memory(DeSmuME_Memory):
         assert self.emu.lib is not None
         self._memoryview = memoryview(MMUPrefix.in_dll(self.emu.lib, "MMU").MAIN_MEM)
         self._driver: Optional[driver_t] = None
-        self._camera: Optional[camera_t] = None
-        self._race_status: Optional[race_status_t] = None
-        self._map_data: Optional[mdat_mapdata_t] = None
-        self._cpoi_data: Optional[ctypes.Array[struct_nkm_cpoi_entry_t]] = None
-        self._kcl_header: Optional[kcol_header_t] = None
-        self._kcl_data: Optional[CollisionData] = None
         self._race_state: Optional[race_state_t] = None
         self._ready = False
-        self._device = device
 
     def read_struct(self, struct_t: Type[T], addr: int) -> T:
         """
@@ -332,7 +351,7 @@ class MarioKart_Memory(DeSmuME_Memory):
         struct = struct_t.from_buffer(mem, addr - 0x02000000)  # main memory region
         return struct
 
-    @property
+    @cached_property
     def driver(self) -> driver_t:
         """
         Get the driver object for the current racer.
@@ -345,13 +364,11 @@ class MarioKart_Memory(DeSmuME_Memory):
         -------
         `driver_t`: The driver object associated with the current racer.
         """
-        if self._driver is None:
-            driver_addr = self.unsigned.read_long(RACER_PTR_ADDR)
-            self._driver = self.read_struct(driver_t, driver_addr)
 
-        return self._driver
+        driver_addr = self.unsigned.read_long(RACER_PTR_ADDR)
+        return self.read_struct(driver_t, driver_addr)
 
-    @property
+    @cached_property
     def camera(self) -> camera_t:
         """
         Retrieve the camera structure from emulator memory.
@@ -364,13 +381,10 @@ class MarioKart_Memory(DeSmuME_Memory):
         -------
         `camera_t`: The camera structure containing camera state and properties.
         """
-        if self._camera is None:
-            camera_addr = self.unsigned.read_long(CAMERA_PTR_ADDR)
-            self._camera = self.read_struct(camera_t, camera_addr)
+        camera_addr = self.unsigned.read_long(CAMERA_PTR_ADDR)
+        return self.read_struct(camera_t, camera_addr)
 
-        return self._camera
-
-    @property
+    @cached_property
     def race_status(self) -> race_status_t:
         """
         Retrieve the current race status information.
@@ -386,13 +400,10 @@ class MarioKart_Memory(DeSmuME_Memory):
         `Exception`: May raise exceptions from read_struct or memory read operations
                        if the race status pointer address is invalid.
         """
-        if self._race_status is None:
-            race_status_addr = self.unsigned.read_long(RACE_STATUS_PTR_ADDR)
-            self._race_status = self.read_struct(race_status_t, race_status_addr)
+        race_status_addr = self.unsigned.read_long(RACE_STATUS_PTR_ADDR)
+        return self.read_struct(race_status_t, race_status_addr)
 
-        return self._race_status
-
-    @property
+    @cached_property
     def map_data(self) -> mdat_mapdata_t:
         """
         Retrieve the map data structure from emulator memory.
@@ -404,13 +415,10 @@ class MarioKart_Memory(DeSmuME_Memory):
         -------
         `mdat_mapdata_t`: The map data structure containing map information.
         """
-        if self._map_data is None:
-            map_data_addr = self.unsigned.read_long(MAP_DATA_PTR_ADDR)
-            self._map_data = self.read_struct(mdat_mapdata_t, map_data_addr)
+        map_data_addr = self.unsigned.read_long(MAP_DATA_PTR_ADDR)
+        return self.read_struct(mdat_mapdata_t, map_data_addr)
 
-        return self._map_data
-
-    @property
+    @cached_property
     def checkpoint_data(self) -> ctypes.Array[struct_nkm_cpoi_entry_t]:
         """
         Retrieve the checkpoint data from the emulator's map.
@@ -425,14 +433,26 @@ class MarioKart_Memory(DeSmuME_Memory):
                 containing checkpoint data for the current map. The array length corresponds
                 to the map's checkpoint count.
         """
-        if self._cpoi_data is None:
-            mdata = self.map_data
-            CpoiArrayType = struct_nkm_cpoi_entry_t * int(mdata.cpoiCount)
-            self._cpoi_data = self.read_struct(CpoiArrayType, mdata.cpoi.value)
+        mdata = self.map_data
+        CpoiArrayType = struct_nkm_cpoi_entry_t * int(mdata.cpoiCount)
+        return self.read_struct(CpoiArrayType, mdata.cpoi.value)
 
-        return self._cpoi_data
+    @cached_property
+    def stag_data(self) -> struct_nkm_stag_data_t:
+        """
+        Retrieve the course info from the emulator's map.
 
-    @property
+        Returns
+        -------
+        `ctypes.Array[struct_nkm_cpoi_entry_t]`: A ctypes array of checkpoint entries
+                containing checkpoint data for the current map. The array length corresponds
+                to the map's checkpoint count.
+        """
+        mdata = self.map_data
+        stag = self.read_struct(struct_nkm_stag_t, mdata.stag.value)
+        return stag.data
+
+    @cached_property
     def collision_header(self) -> kcol_header_t:
         """
         Retrieve the collision header structure from the emulator.
@@ -445,12 +465,9 @@ class MarioKart_Memory(DeSmuME_Memory):
         -------
         `kcol_header_t`: The collision header structure containing collision data metadata.
         """
-        if self._kcl_header is None:
-            self._kcl_header = self.read_struct(kcol_header_t, COLLISION_DATA_ADDR)
+        return self.read_struct(kcol_header_t, COLLISION_DATA_ADDR)
 
-        return self._kcl_header
-
-    @property
+    @cached_property
     def race_state(self) -> race_state_t:
         """
         Retrieve the current race state.
@@ -463,11 +480,8 @@ class MarioKart_Memory(DeSmuME_Memory):
         -------
         `race_state_t`: The current race state object containing race information.
         """
-        if self._race_state is None:
-            addr = self.unsigned.read_long(RACE_STATE_PTR_ADDR)
-            self._race_state = self.read_struct(race_state_t, addr)
-
-        return self._race_state
+        addr = self.unsigned.read_long(RACE_STATE_PTR_ADDR)
+        return self.read_struct(race_state_t, addr)
 
     @property
     def race_ready(self):
@@ -504,7 +518,7 @@ class MarioKart_Memory(DeSmuME_Memory):
         count = (end_ptr.value - (start_ptr.value + 0x10)) // ctypes.sizeof(
             struct_kcol_prism_data_t
         )
-        return cast(
+        return t_cast(
             _PrismEntries,
             self._np_entries(struct_kcol_prism_data_t, count, start_ptr.value + 0x10),
         )
@@ -542,7 +556,7 @@ class MarioKart_Memory(DeSmuME_Memory):
         positions: Annotated[NDArray[np.float32], Literal["N", 3]],
         normals: Annotated[NDArray[np.float32], Literal["N", 3]],
     ) -> _TriangleVertices:
-        height = cast(NDArray[np.float32], prisms["height"]["val"]) / (1 << 12)
+        height = t_cast(NDArray[np.float32], prisms["height"]["val"]) / (1 << 12)
         v1 = _pack_i4_fx32(positions[prisms["posIdx"]])
         fNrm = _pack_i4_fx32(normals[prisms["fNrmIdx"]])
         eNrm1 = _pack_i4_fx32(normals[prisms["eNrm1Idx"]])
@@ -556,12 +570,12 @@ class MarioKart_Memory(DeSmuME_Memory):
         v3: np.ndarray = v1 + crossA * (height / np.vecdot(eNrm3, crossA))[:, None]
 
         return {
-            "v1": torch.tensor(v1, dtype=torch.float32),
-            "v2": torch.tensor(v2, dtype=torch.float32),
-            "v3": torch.tensor(v3, dtype=torch.float32),
+            "v1": v1,
+            "v2": v2,
+            "v3": v3,
         }
 
-    @property
+    @cached_property
     def collision_data(self) -> CollisionData:
         """
         Retrieve collision data from the KCL (Collision) file.
@@ -574,14 +588,12 @@ class MarioKart_Memory(DeSmuME_Memory):
         `CollisionData`: A dictionary containing collision entries, prism data,
                           vertex positions, and normal vectors.
         """
-        if self._kcl_data is None:
-            entries = self._col_entries()
-            triangles = self._col_prism_vertices(
-                entries["prism"], entries["vert"], entries["nrm"]
-            )
-            self._kcl_data = {**entries, **triangles}
-
-        return cast(CollisionData, self._kcl_data)
+        entries = self._col_entries()
+        triangles = self._col_prism_vertices(
+            entries["prism"], entries["vert"], entries["nrm"]
+        )
+        kcl_data = {**entries, **triangles}
+        return t_cast(CollisionData, kcl_data)
 
     @property
     def driver_status(self):
@@ -699,20 +711,6 @@ class MarioKart_Memory(DeSmuME_Memory):
         """
         return self.race_status.driverStatus[index]
 
-    # PyTorch API Methods #
-    def set_torch_device(self, device: torch.device):
-        self._device = device
-
-    def get_torch_device(self):
-        """
-        Get the torch device used for tensor operations.
-
-        Returns
-        -------
-        `torch`.device: The device (CPU, CUDA, or MPS) configured for this emulator instance.
-        """
-        return self._device
-
     # Memory API Methods #
     def get_camera_settings(self):
         """
@@ -728,31 +726,58 @@ class MarioKart_Memory(DeSmuME_Memory):
                 - near (float): The near clipping plane distance.
         """
         return {
-            "fov_sin": self.camera.fovSin,
-            "fov_cos": self.camera.fovCos,
-            "aspect": self.camera.aspectRatio,
-            "far": self.camera.frustumFar,
-            "near": self.camera.frustumNear,
+            "fov_sin": float(self.camera.fovSin),
+            "fov_cos": float(self.camera.fovCos),
+            "aspect": float(self.camera.aspectRatio),
+            "far": float(self.camera.frustumFar),
+            "near": float(self.camera.frustumNear),
         }
 
-    # Screen API Methods #
-    def _mv_matrix(self):
-        device = self.get_torch_device()
 
-        out = torch.eye(4).to(device)
-        mtx = self.camera.mtx.to(device).T
+
+    # Screen API Methods #
+    @property
+    def camera_matrix(self) -> np.ndarray[tuple[Literal[4], Literal[4]], np.dtype[np.float32]]:
+        out = np.eye(4, dtype=np.float32)
+        mtx = _unpack_struct_fx(self.camera.mtx).T * FX32_SCALE_FACTOR
         mtx[:3, 3] *= 16  # position is scaled by 16
         out[:3, :] = mtx
-
         return out
 
-    def _proj_matrix(self, epsilon=1e-8):
-        device = self.get_torch_device()
+    @property
+    def driver_matrix(self) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]:
+        return _unpack_struct_fx(self.driver.mainMtx)[:3, :].T * FX32_SCALE_FACTOR
 
+    @property
+    def driver_position(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
+        return _unpack_struct_fx(self.driver.position) * FX32_SCALE_FACTOR
+
+    @property
+    def driver_direction(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
+        return _unpack_struct_fx(self.driver.direction) * FX32_SCALE_FACTOR
+
+    @property
+    def driver_velocity(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
+        return _unpack_struct_fx(self.driver.drivingDirection) * FX32_SCALE_FACTOR
+
+    @property
+    def driver_matrix2(self) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]:
+        up = self.driver_matrix[1]
+        right = np.cross(self.driver_velocity, up)
+        if np.linalg.norm(right) < 1e-6:
+            right = self.driver_matrix[0]
+
+        return np.stack([
+            right,
+            up,
+            self.driver_direction,
+        ])
+
+    def _proj_matrix(self, epsilon=1e-8):
         cam = self.get_camera_settings()
 
         # opengl projection matrix
-        out = torch.zeros((4, 4), device=device)
+        out = np.zeros((4, 4))
         out[0, 0] = cam["fov_cos"] / (max(cam["fov_sin"] * cam["aspect"], epsilon))
         out[1, 1] = cam["fov_cos"] / (max(cam["fov_sin"], epsilon))
         out[2, 2] = -(cam["far"] + cam["near"]) / max(cam["far"] - cam["near"], epsilon)
@@ -763,15 +788,14 @@ class MarioKart_Memory(DeSmuME_Memory):
 
         return out
 
-    def _convert_to_camera_space(self, points: torch.Tensor):
-        mvm = self._mv_matrix()
-        padded = torch.nn.functional.pad(points, (0, 1), "constant", 1)
+    def _convert_to_camera_space(self, points: np.ndarray):
+        mvm = self.camera_matrix
+        padded = np.pad(points, ((0, 0), (0, 1)), mode='constant', constant_values=1)
         cam_space = (mvm @ padded.T).T  # convert to camera space
         return cam_space
 
-    def _convert_to_screen_space(self, points: torch.Tensor):
+    def _convert_to_screen_space(self, points: np.ndarray):
         pm = self._proj_matrix()
-        far = self.get_camera_settings()["far"]
         cam_space = self._convert_to_camera_space(points)  # convert to camera space
 
         # convert to clip space
@@ -791,21 +815,21 @@ class MarioKart_Memory(DeSmuME_Memory):
         screen_depth = clip_space[:, 2]
 
         return {
-            "screen": torch.stack([screen_x, screen_y], dim=-1),
+            "screen": np.stack([screen_x, screen_y], axis=-1),
             "depth": screen_depth,
         }
 
     def _get_screen_z_clip_mask(self, screen_space):
         cam = self.get_camera_settings()
-        z_clip: torch.Tensor = (screen_space[:, 2] > cam["near"]) & (
+        z_clip: np.ndarray = (screen_space[:, 2] > cam["near"]) & (
             screen_space[:, 2] < cam["far"]
         )
 
         return z_clip
 
     def project_to_screen(
-        self, points: torch.Tensor, normalize_depth=False
-    ) -> dict[str, torch.Tensor]:
+        self, points: np.ndarray, normalize_depth=False
+    ) -> dict[str, np.ndarray]:
         """
         Project 3D points to 2D screen space with optional depth normalization.
 
@@ -821,7 +845,7 @@ class MarioKart_Memory(DeSmuME_Memory):
                 - 'mask': Boolean mask indicating which points are within the screen's z-clipping bounds.
         """
         sd = self._convert_to_screen_space(points)
-        out = torch.cat([sd["screen"], sd["depth"][:, None]], dim=-1)
+        out = np.concat([sd["screen"], sd["depth"][:, None]], axis=-1)
         mask = self._get_screen_z_clip_mask(out)
         if normalize_depth:
             far = self.get_camera_settings()["far"]
@@ -829,7 +853,7 @@ class MarioKart_Memory(DeSmuME_Memory):
 
         return {"screen": out, "mask": mask}
 
-    def checkpoint_pos(self, device=None) -> _CheckpointPos:
+    def checkpoint_pos(self) -> _CheckpointPos:
         curr_checkpoint_id = self.driver_status.curCpoi
         next_checkpoint_id = (
             curr_checkpoint_id + 1
@@ -838,18 +862,16 @@ class MarioKart_Memory(DeSmuME_Memory):
         )
         curr_entry = self.checkpoint_data[curr_checkpoint_id]
         next_entry = self.checkpoint_data[next_checkpoint_id]
-        _y = self.camera.target[1].item()
+        _y = float(self.camera.target.y)
 
-        curr_checkpoint_pos = torch.tensor(
+        curr_checkpoint_pos = np.array(
             [[curr_entry.x1, _y, curr_entry.z1], [curr_entry.x2, _y, curr_entry.z2]],
-            dtype=torch.float32,
-            device=device,
+            dtype=np.float32
         )
 
-        next_checkpoint_pos = torch.tensor(
+        next_checkpoint_pos = np.array(
             [[next_entry.x1, _y, next_entry.z1], [next_entry.x2, _y, next_entry.z2]],
-            dtype=torch.float32,
-            device=device,
+            dtype=np.float32
         )
 
         out: _CheckpointPos = {
@@ -861,92 +883,37 @@ class MarioKart_Memory(DeSmuME_Memory):
 
         return out
 
-    def checkpoint_angle(self, device=None) -> _CheckpointAngle:
-        pos_info = self.checkpoint_pos(device)
+    def checkpoint_angle(self) -> _CheckpointAngle:
+        pos_info = self.checkpoint_pos()
         C = pos_info["next_checkpoint_pos"]
         mp = (C[0, :] - C[1, :]) / 2  # midpoint
-        M = self.driver.mainMtx.to(device)[:3, :]
-        mp_local = mp @ M.T
-        mp_angle = torch.atan2(mp_local[2], mp_local[0])
+        M = self.driver_matrix
+        mp_local = mp @ M
+        mp_angle = np.arctan2(mp_local[2], mp_local[0])
         out: _CheckpointAngle = {"midpoint_angle": mp_angle}
         return out
 
-    def checkpoint_info(self, device=None) -> CheckpointInfo:
-        pos_info = self.checkpoint_pos(device)
-        angle_info = self.checkpoint_angle(device)
+    def checkpoint_info(self) -> CheckpointInfo:
+        pos_info = self.checkpoint_pos()
+        angle_info = self.checkpoint_angle()
         out: CheckpointInfo = {**pos_info, **angle_info}
         return out
 
-    def read_facing_point_checkpoint(self, device=None):
-        position = self.driver.position
-        direction = self.driver.direction
+    def read_facing_point_checkpoint(self):
+        position = self.driver_position
+        direction = self.driver_direction
         checkpoint = self.checkpoint_info()["next_checkpoint_pos"]
-        mask_xz = torch.tensor([0, 2], dtype=torch.int32, device=device)
+        mask_xz = np.array([0, 2], dtype=np.int32)
         pos_xz = position[mask_xz]
         dir_xz = direction[mask_xz]
-        pxz_1, pxz_2 = checkpoint[:, mask_xz].chunk(2, dim=0)
+        pxz_1, pxz_2 = np.split(checkpoint[:, mask_xz], 2, axis=0)
         pxz_1 = pxz_1.squeeze(0)
         pxz_2 = pxz_2.squeeze(0)
         intersect, _ = ray_line_intersection(pos_xz, dir_xz, pxz_1, pxz_2)
-        intersect = torch.tensor(
-            [intersect[0], position[1], intersect[1]], device=device
+        intersect = np.array(
+            [intersect[0], position[1], intersect[1]]
         )
         return intersect
-
-    def obstacle_info(self, n_rays, max_dist=float("inf"), device=None) -> RayCastInfo:
-        M = self.driver.mainMtx.to(device)[:3, :].T
-        pos = self.driver.position.to(device)
-        _, R = generate_plane_vectors(n_rays, 180, M, pos)
-        pos[1] += 10.0
-        pos = pos.unsqueeze(0)
-        col_data = self.collision_data
-        wall_mask = col_data["prism_attribute"]["is_floor"] != 1
-
-        v1 = col_data["v1"].to(device)
-        v2 = col_data["v2"].to(device)
-        v3 = col_data["v3"].to(device)
-        V = torch.stack([v1, v2, v3], dim=1)
-        V = V[wall_mask, :, :]  # (B, 3, 3)
-        B = R.shape[0]
-        P = pos.repeat(B, 1)
-
-        all_hits = vmap_all_pairs(V, P, R, False, 1e-6)
-        distances = all_hits[:, :, 0]
-        min_dists, hit_ids = torch.min(
-            torch.nan_to_num(distances, nan=float("inf")), dim=1
-        )
-        valid_rays_mask = min_dists < max_dist
-        min_dists[~valid_rays_mask] = max_dist
-
-        out: RayCastInfo = {
-            "distance": min_dists,
-            "position": P + (R * min_dists[:, None]),
-            "mask": valid_rays_mask,
-        }
-
-        return out
-
-    def get_obs(self, n_rays, max_dist, device=None):
-        return torch.cat(
-            [
-                self.obstacle_info(n_rays, max_dist=max_dist, device=device)[
-                    "distance"
-                ],
-                self.checkpoint_info(device)["midpoint_angle"].reshape(1),
-            ],
-            dim=-1,
-        )
-
-    def reset(self):
-        self._driver: Optional[driver_t] = None
-        self._camera: Optional[camera_t] = None
-        self._race_status: Optional[race_status_t] = None
-        self._map_data: Optional[mdat_mapdata_t] = None
-        self._cpoi_data: Optional[ctypes.Array[struct_nkm_cpoi_entry_t]] = None
-        self._kcl_header: Optional[kcol_header_t] = None
-        self._kcl_data: Optional[CollisionData] = None
-        self._race_state: Optional[race_state_t] = None
-        self._ready = False
 
 
 MT = TypeVar("MT", bound=Union[np.ndarray, list])
@@ -982,7 +949,7 @@ class MarioKart(DeSmuME):
     ```
     """
 
-    def __init__(self, *args, max_dist: int, n_rays: int, device: Optional[torch.device] = None, **kwargs):
+    def __init__(self, *args, **kwargs):
         """
         Initialize the emulator with configuration parameters.
 
@@ -1005,21 +972,10 @@ class MarioKart(DeSmuME):
         `count` (`int`): Frame counter, initialized to 0.
         """
         super().__init__(*args, **kwargs)
-        if device is None:
-            device = torch.device("cpu")
-
-        self.device = device
         self.count = 0
-        self.max_dist = max_dist
-        self.n_rays = n_rays
-        self._memory = MarioKart_Memory(self, *args, device=device, **kwargs)
+        self._memory = MarioKart_Memory(self, *args, **kwargs)
 
     @property
     @override
     def memory(self) -> MarioKart_Memory:
         return self._memory
-
-    @override
-    def reset(self):
-        super().reset()
-        self.memory.reset()
