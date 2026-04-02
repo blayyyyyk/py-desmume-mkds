@@ -21,12 +21,20 @@ This fork extends the standard `py-desmume` library by introducing direct `ctype
 * **macOS:** `brew install sdl2 meson glib gcc`
 * **Windows:** Visual Studio 2019 or later
 
+> Please refer to the original fork's guide for more detailed build instructions for your specific device
+
 You can build the library from source by running setup via pip, which will compile the C++ emulator core and bind it to Python.
 
 ```bash
-pip install .
-
+pip install py-desmume-mkds --no-build-isolation
 ```
+
+Or, if you have cloned the repo locally,
+```bash
+pip install -e . --no-build-isolation
+```
+> [!IMPORTANT]
+> It is important you do not trigger a build within a venv or else you may run into issues where the os cannot locate meson, hence the `--no-build-isolation`
 
 ---
 
