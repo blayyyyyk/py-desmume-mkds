@@ -1,6 +1,6 @@
 from ctypes import *
-from ctypes import _Pointer, _SimpleCData, _CFunctionType
-from typing import ClassVar, Any, List, Callable, TypeVar, Union as UnionT
+from ctypes import _Pointer, _SimpleCData, _CFunctionType, Array
+from typing import ClassVar, Any, List, Callable, TypeVar, Union as UnionT, Protocol, Type
 from typing import TYPE_CHECKING
 T = TypeVar('T', bound=UnionT[Structure, Union, _SimpleCData, _Pointer, _CFunctionType])
 POINTER_T = _Pointer[T]
@@ -20,6 +20,13 @@ RACE_CONFIG_PTR_ADDR: int = 0x021759A0
 FX32_SCALE_FACTOR: float = 1 / (1 << 12)
 
 # Forward declarations
+
+class Reader:
+    def read_struct(self, struct_t: Type[T], addr: int) -> T:
+        ...
+        
+class PointerConfig:
+    reader: Reader
 
 class CARDRomRegion(Structure):
     """

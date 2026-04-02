@@ -14,7 +14,7 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with py-desmume.  If not, see <https://www.gnu.org/licenses/>.
-__version__ = '0.0.17'
+__version__ = '0.0.18'
 from setuptools import setup, find_packages
 
 from setuptools.command.build_ext import build_ext
@@ -161,7 +161,6 @@ setup(
         'Pillow == 11.0.0',
         'pygobject == 3.50.0',
         'numpy == 2.4.0',
-        'torch == 2.9.1',
         'jaxtyping == 0.3.6'
     ],
     classifiers=[

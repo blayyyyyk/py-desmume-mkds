@@ -6,6 +6,7 @@ from typing import (
     Generic,
     Literal,
     Optional,
+    Protocol,
     Type,
     TypedDict,
     TypeVar,
@@ -51,6 +52,7 @@ from desmume.mkds.mkds import (
     union_MtxFx33,
     union_MtxFx43,
 )
+
 from desmume.vector import (
     generate_plane_vectors,
     ray_line_intersection,
@@ -94,62 +96,7 @@ _PrismEntriesAttributes = TypedDict(
 )
 
 
-MtxLike = Union[union_MtxFx22, union_MtxFx33, union_MtxFx43]
-VecLike = Union[struct_VecFx16, struct_VecFx32, VecFx16, VecFx32, quaternion_t, struct_quaternion_t]
-
-@overload
-def _unpack_struct_fx(struct: union_MtxFx22) -> np.ndarray[tuple[Literal[2], Literal[2]], np.dtype[np.float32]]: ...
-
-@overload
-def _unpack_struct_fx(struct: union_MtxFx33) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]: ...
-
-@overload
-def _unpack_struct_fx(struct: union_MtxFx43) -> np.ndarray[tuple[Literal[4], Literal[3]], np.dtype[np.float32]]: ...
-
-@overload
-def _unpack_struct_fx(struct: struct_VecFx16 | VecFx16) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]: ...
-
-@overload
-def _unpack_struct_fx(struct: struct_VecFx32 | VecFx32) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]: ...
-
-@overload
-def _unpack_struct_fx(struct: struct_quaternion_t | quaternion_t) -> np.ndarray[tuple[Literal[4]], np.dtype[np.float32]]: ...
-
-def _unpack_struct_fx(struct: MtxLike | VecLike):
-    c_dtype = None
-    if isinstance(struct, union_MtxFx22):
-        shape = (2, 2)
-    elif isinstance(struct, union_MtxFx33):
-        shape = (3, 3)
-    elif isinstance(struct, union_MtxFx43):
-        shape = (4, 3)
-    elif isinstance(struct, (struct_VecFx16, VecFx16)):
-        shape = (3,)
-    elif isinstance(struct, (struct_VecFx32, VecFx32)):
-        shape = (3,)
-    elif isinstance(struct, (struct_quaternion_t, quaternion_t)):
-        shape = (4,)
-
-    if isinstance(struct, (union_MtxFx22, union_MtxFx33, union_MtxFx43, struct_VecFx32, VecFx32, struct_quaternion_t, quaternion_t)):
-        c_dtype = ctypes.c_int32
-    elif isinstance(struct, (struct_VecFx16, VecFx16)):
-        c_dtype = ctypes.c_int16
-
-    array_struct = c_dtype * reduce(lambda x, y: x * y, shape)
-    if isinstance(struct, (union_MtxFx22, union_MtxFx33, union_MtxFx43)):
-        array = t_cast(ctypes.Array[ctypes.c_int32], struct.a)
-    elif isinstance(struct, (struct_VecFx16, VecFx16, struct_VecFx32, VecFx32, struct_quaternion_t, quaternion_t)):
-        array = array_struct.from_buffer(struct)
-
-    if c_dtype == ctypes.c_int16:
-        out_mtx = np.frombuffer(array, dtype=np.int16)
-    else:
-        out_mtx = np.frombuffer(array, dtype=np.int32)
-
-    return out_mtx.astype(np.float32).reshape(*shape)
-
-
-def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
+def _unpack_col_attributes(raw_attrs: np.ndarray):
     """
     Vectorized version of parse_attributes.
 
@@ -182,7 +129,50 @@ def _unpack_col_attributes(raw_attrs: np.ndarray) -> _PrismEntriesAttributes:
     result["is_wall"] = (raw_attrs >> 14) & 0x1
     result["is_floor"] = (raw_attrs >> 15) & 0x1
 
-    return t_cast(_PrismEntriesAttributes, result)
+    return result
+
+MtxLike = Union[union_MtxFx22, union_MtxFx33, union_MtxFx43]
+VecLike = Union[struct_VecFx16, struct_VecFx32, VecFx16, VecFx32, quaternion_t, struct_quaternion_t]
+
+def get_fx(struct: MtxLike | VecLike, shape: tuple[int, ...], dtype: Union[type[ctypes.c_int16], type[ctypes.c_int32]] = ctypes.c_int32) -> np.ndarray:
+    array_struct = dtype * reduce(lambda x, y: x * y, shape)
+    if len(shape) > 1:
+        array = t_cast(ctypes.Array[ctypes.c_int32], struct.a)
+    else:
+        array = array_struct.from_buffer(struct)
+
+    if dtype == ctypes.c_int16:
+        out_mtx = np.frombuffer(array, dtype=np.int16)
+    else:
+        out_mtx = np.frombuffer(array, dtype=np.int32)
+
+    return out_mtx.astype(np.float32).reshape(*shape) * FX32_SCALE_FACTOR
+
+
+
+def set_fx(struct: MtxLike | VecLike, shape: tuple[int, ...], val: np.ndarray, dtype: Union[type[ctypes.c_int16], type[ctypes.c_int32]] = ctypes.c_int32):
+    assert shape == val.shape, f"provided value has the wrong shape (expected shape: {shape}, got: {val.shape})"
+    
+    if dtype == ctypes.c_int16:
+        fx32_vals = (val / FX32_SCALE_FACTOR).astype(np.int16)
+    else:
+        fx32_vals = (val / FX32_SCALE_FACTOR).astype(np.int32)
+    
+    fx32_vals = np.ascontiguousarray(fx32_vals)
+    struct_size = ctypes.sizeof(struct)
+    array_size = fx32_vals.nbytes
+
+    assert array_size == struct_size, (
+        f"Memory size mismatch! Cannot write {array_size} bytes "
+        f"into a struct of {struct_size} bytes."
+    )
+
+    ctypes.memmove(
+        ctypes.addressof(struct),
+        fx32_vals.ctypes.data,
+        array_size
+    )
+
 
 
 def _pack_i4_fx32(arr):
@@ -234,6 +224,109 @@ class CheckpointInfo(_CheckpointPos, _CheckpointAngle):
 
 class CollisionData(_CollisionEntries, _TriangleVertices):
     pass
+
+class ReaderHook(Protocol):
+    def __call__(self, cls: Type[T], addr: int) -> T:
+        ...
+
+
+class MarioKart_KCL:
+    
+    def __init__(self, read_hook: ReaderHook):
+        self.read_struct = read_hook
+
+    @property
+    def header(self) -> kcol_header_t:
+        return self.read_struct(kcol_header_t, COLLISION_DATA_ADDR)
+
+    @property
+    def prisms(self) -> np.ndarray:
+        start_ptr = self.header.prismDataOffset.value
+        end_ptr = self.header.blockDataOffset.value
+        count = (end_ptr - (start_ptr + 0x10)) // ctypes.sizeof(
+            struct_kcol_prism_data_t
+        )
+        return self.read_kcl_struct(struct_kcol_prism_data_t, count, start_ptr + 0x10)
+        
+    @property
+    def prism_normals(self) -> np.ndarray:
+        return self.normals[[
+            self.prism_normals_face_ids,
+            self.prism_normals_edge_ids_1,
+            self.prism_normals_edge_ids_2,
+            self.prism_normals_edge_ids_3,
+        ]]
+        
+    @property
+    def prism_normals_face_ids(self) -> np.ndarray:
+        return self.prisms["fNrmIdx"]
+        
+    @property
+    def prism_normals_edge_ids_1(self) -> np.ndarray:
+        return self.prisms["eNrm1Idx"]
+        
+    @property
+    def prism_normals_edge_ids_2(self) -> np.ndarray:
+        return self.prisms["eNrm2Idx"]
+        
+    @property
+    def prism_normals_edge_ids_3(self) -> np.ndarray:
+        return self.prisms["eNrm3Idx"]
+        
+    @property
+    def prism_vertices(self) -> np.ndarray:
+        return self.vertices[self.prism_vertices_vertex_ids]
+        
+    @property
+    def prism_vertices_vertex_ids(self) -> np.ndarray:
+        return self.prisms["posIdx"]
+        
+    @property
+    def prism_heights(self) -> np.ndarray:
+        return self.prisms["height"]["val"] * FX32_SCALE_FACTOR
+        
+    @property
+    def prism_attributes(self) -> np.ndarray:
+        return _unpack_col_attributes(self.prisms["attribute"])
+
+    @property
+    def vertices(self) -> np.ndarray:
+        count = self.prism_vertices_vertex_ids.max() + 1
+        addr = self.header.posDataOffset.value
+        return structured_to_unstructured(self.read_kcl_struct(VecFx32, count, addr), dtype=np.float32) * FX32_SCALE_FACTOR
+
+    @property
+    def normals(self) -> np.ndarray:
+        addr = self.header.nrmDataOffset.value
+        count = np.stack([
+            self.prism_normals_face_ids,
+            self.prism_normals_edge_ids_1,
+            self.prism_normals_edge_ids_2,
+            self.prism_normals_edge_ids_3,
+        ]).max() + 1
+        return structured_to_unstructured(self.read_kcl_struct(VecFx16, count, addr), dtype=np.float32) * FX32_SCALE_FACTOR
+
+    @cached_property
+    def triangular_faces(self):
+        height = self.prism_heights
+        v0 = self.prism_vertices
+        fNrm, eNrm0, eNrm1, eNrm2 = np.unstack(self.prism_normals)
+
+        crossA = np.cross(eNrm0, fNrm, axis=-1)
+        crossB = np.cross(eNrm1, fNrm, axis=-1)
+        
+        v1 = v0 + crossB * (height / np.vecdot(eNrm2, crossB))[:, None]
+        v2 = v0 + crossA * (height / np.vecdot(eNrm2, crossA))[:, None]
+        
+        faces = np.stack([v0, v1, v2], axis=1)
+        return faces
+        
+    X = TypeVar("X", bound=ctypes.Structure)
+    def read_kcl_struct(self, struct: type[X], count, offset):
+        ArrayType = struct * int(count)
+        entries_ctypes = self.read_struct(ArrayType, offset)
+        entries = np.ctypeslib.as_array(entries_ctypes)
+        return entries
 
 class MarioKart_Memory(DeSmuME_Memory):
     """
@@ -629,6 +722,12 @@ class MarioKart_Memory(DeSmuME_Memory):
         """
         return self.race_state.frameCounter
 
+
+    @cached_property
+    def kcl(self) -> MarioKart_KCL:
+        return MarioKart_KCL(self.read_struct)
+
+
     def _octree_search(self, point: tuple[float, float, float]):
         header = self.collision_header
 
@@ -733,35 +832,74 @@ class MarioKart_Memory(DeSmuME_Memory):
             "near": float(self.camera.frustumNear),
         }
 
+    def set_vector(self, struct: struct_VecFx32 | struct_VecFx16, val: np.ndarray):
+        struct.x.val = int(val[0].item() / FX32_SCALE_FACTOR)
+        struct.y.val = int(val[1].item() / FX32_SCALE_FACTOR)
+        struct.z.val = int(val[2].item() / FX32_SCALE_FACTOR)
+
+    def set_matrix(self, struct: union_MtxFx22 | union_MtxFx33 | union_MtxFx43, val: np.ndarray):
+        """
+        Writes a NumPy array into a DS fixed-point matrix union.
+        Supports MtxFx22, MtxFx33, and MtxFx43 dynamically.
+        """
+        fx32_vals = (val / FX32_SCALE_FACTOR).astype(np.int32)
+        fx32_vals = np.ascontiguousarray(fx32_vals)
+        struct_size = ctypes.sizeof(struct)
+        array_size = fx32_vals.nbytes
+
+        assert array_size == struct_size, (
+            f"Memory size mismatch! Cannot write {array_size} bytes "
+            f"into a struct of {struct_size} bytes."
+        )
+
+        ctypes.memmove(
+            ctypes.addressof(struct),
+            fx32_vals.ctypes.data,
+            array_size
+        )
 
 
     # Screen API Methods #
     @property
-    def camera_matrix(self) -> np.ndarray[tuple[Literal[4], Literal[4]], np.dtype[np.float32]]:
+    def camera_matrix(self) -> np.ndarray:
         out = np.eye(4, dtype=np.float32)
-        mtx = _unpack_struct_fx(self.camera.mtx).T * FX32_SCALE_FACTOR
+        mtx = get_fx(self.camera.mtx, (4, 3)).T
         mtx[:3, 3] *= 16  # position is scaled by 16
         out[:3, :] = mtx
         return out
 
     @property
-    def driver_matrix(self) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]:
-        return _unpack_struct_fx(self.driver.mainMtx)[:3, :].T * FX32_SCALE_FACTOR
+    def driver_matrix(self) -> np.ndarray:
+        return get_fx(self.driver.mainMtx, (4, 3))[:3, :].T
+
+    # @driver_matrix.setter
+    # def driver_matrix(self, value: np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]):
+    #     result = _unpack_struct_fx(self.driver.mainMtx)
+    #     result[:3] = value.T
+    #     self.set_matrix(self.driver.mainMtx, result)
 
     @property
-    def driver_position(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
-        return _unpack_struct_fx(self.driver.position) * FX32_SCALE_FACTOR
+    def driver_position(self) -> np.ndarray:
+        return get_fx(self.driver.position, (3,))
+        
+    @driver_position.setter
+    def driver_position(self, value: np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]):
+        set_fx(self.driver.position, (3,), value)
 
     @property
-    def driver_direction(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
-        return _unpack_struct_fx(self.driver.direction) * FX32_SCALE_FACTOR
+    def driver_direction(self) -> np.ndarray:
+        return get_fx(self.driver.direction, (3,))
 
     @property
-    def driver_velocity(self) -> np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]:
-        return _unpack_struct_fx(self.driver.drivingDirection) * FX32_SCALE_FACTOR
+    def driver_velocity(self):
+        return get_fx(self.driver.drivingDirection, (3,))
+
+    @driver_velocity.setter
+    def driver_velocity(self, value: np.ndarray[tuple[Literal[3]], np.dtype[np.float32]]):
+        set_fx(self.driver.velocity, (3,), value)
 
     @property
-    def driver_matrix2(self) -> np.ndarray[tuple[Literal[3], Literal[3]], np.dtype[np.float32]]:
+    def driver_matrix2(self):
         up = self.driver_matrix[1]
         right = np.cross(self.driver_velocity, up)
         if np.linalg.norm(right) < 1e-6:
@@ -819,16 +957,25 @@ class MarioKart_Memory(DeSmuME_Memory):
             "depth": screen_depth,
         }
 
-    def _get_screen_z_clip_mask(self, screen_space):
+    def _get_screen_z_clip_mask(self, screen_space, mode: Literal["native"] | Literal["native_near"] | Literal["native_far"] | Literal["non-native"] | Literal["none"] = "native"):
         cam = self.get_camera_settings()
-        z_clip: np.ndarray = (screen_space[:, 2] > cam["near"]) & (
-            screen_space[:, 2] < cam["far"]
-        )
+        if mode == "native":
+            z_clip: np.ndarray = (screen_space[:, 2] > cam["near"]) & (screen_space[:, 2] < cam["far"])
+        elif mode == "native_near":
+            z_clip: np.ndarray = screen_space[:, 2] > cam["near"]
+        elif mode == "native_far":
+            z_clip: np.ndarray = (screen_space[:, 2] > 0) & (screen_space[:, 2] < cam["far"])
+        elif mode == "non-native":
+            z_clip: np.ndarray = screen_space[:, 2] > 0
+        elif mode == "none":
+            z_clip: np.ndarray = np.ones(screen_space.shape[0], dtype=bool)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
 
         return z_clip
 
     def project_to_screen(
-        self, points: np.ndarray, normalize_depth=False
+        self, points: np.ndarray, normalize_depth=False, z_clip_mode: Literal["native"] | Literal["native_near"] | Literal["native_far"] | Literal["non-native"] | Literal["none"] = "native"
     ) -> dict[str, np.ndarray]:
         """
         Project 3D points to 2D screen space with optional depth normalization.
@@ -846,7 +993,8 @@ class MarioKart_Memory(DeSmuME_Memory):
         """
         sd = self._convert_to_screen_space(points)
         out = np.concat([sd["screen"], sd["depth"][:, None]], axis=-1)
-        mask = self._get_screen_z_clip_mask(out)
+        mask = self._get_screen_z_clip_mask(out, mode=z_clip_mode)
+
         if normalize_depth:
             far = self.get_camera_settings()["far"]
             out[:, 2] = -far / (-far + out[:, 2])
@@ -896,7 +1044,7 @@ class MarioKart_Memory(DeSmuME_Memory):
     def checkpoint_info(self) -> CheckpointInfo:
         pos_info = self.checkpoint_pos()
         angle_info = self.checkpoint_angle()
-        out: CheckpointInfo = {**pos_info, **angle_info}
+        out: CheckpointInfo = t_cast(CheckpointInfo, {**pos_info, **angle_info})
         return out
 
     def read_facing_point_checkpoint(self):
@@ -978,4 +1126,4 @@ class MarioKart(DeSmuME):
     @property
     @override
     def memory(self) -> MarioKart_Memory:
-        return self._memory
+        return t_cast(MarioKart_Memory, self._memory)
