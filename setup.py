@@ -158,10 +158,10 @@ setup(
     url='https://github.com/blayyyyyk/py-desmume-mkds',
     python_requires=">=3.7",
     install_requires=[
-        'Pillow == 11.0.0',
+        'Pillow >= 11.0.0',
         'pygobject == 3.50.0',
-        'numpy == 2.4.0',
-        'jaxtyping == 0.3.6'
+        'numpy >= 2.4.0',
+        'jaxtyping >= 0.3.6'
     ],
     classifiers=[
         'Development Status :: 3 - Alpha',
