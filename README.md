@@ -11,7 +11,7 @@ This fork extends the standard `py-desmume` library by introducing direct `ctype
 * **Fixed-Point to Tensor Conversion**: Automatic, on-the-fly conversion of Nintendo DS `fx32`/`fx16` fixed-point coordinate structures to scaled PyTorch tensors.
 * **Hardware-Accelerated Raycasting**: Batched `torch.vmap` ray-triangle intersection testing using the track's native collision geometry (KCL).
 * **3D to 2D Screen Projection**: Helper functions to convert 3D world coordinates into 2D screen-space pixel coordinates using the game's actual camera matrix.
-* **Track Octree Traversal**: Search the game's KCL octree to query floor and wall geometry properties at specific world coordinates.
+* **Track Octree Traversal**: Search the game's KCL octree to query floor and wall geometry properties at specific world coordinates. 
 
 ## Installation
 

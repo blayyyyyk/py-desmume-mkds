@@ -170,6 +170,14 @@ jobs:
         with:
           name: mingw-wheels-msys2-py-${{ matrix.msystem }}
           path: dist/*.whl
+          # Assuming you just built your wheels into a 'dist/' folder
+      - name: Upload wheels to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') # Only run if a tag was pushed
+        with:
+        files: |
+            dist/*.whl
+            dist/*.tar.gz
   deploy:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
