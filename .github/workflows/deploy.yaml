@@ -46,13 +46,20 @@ jobs:
             curl -O -L "$url"
           done
 
+      - name: Extract Target Version
+        run: |
+          # Grabs the version defined in your setup.py
+          TARGET_VERSION=$(python -W ignore setup.py --version)
+          echo "Target version is $TARGET_VERSION"
+          # Save it to the GitHub environment so the next step can use it
+          echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
+
       - name: Unpack, Inject, and Repack Wheels
         run: |
           mkdir unpacked
           mkdir new_wheels
           
-          # Convert package hyphens to underscores for wheel specifications
-          OLD_PKG_US=$(echo "${{ env.UPSTREAM_PACKAGE }}" | tr '-' '_')
+          # Convert package hyphens to underscores for the folder naming convention
           NEW_PKG_US=$(echo "${{ env.MY_PYPI_PACKAGE }}" | tr '-' '_')
           
           for wheel in original_wheels/*.whl; do
@@ -66,20 +73,19 @@ jobs:
             echo "Injecting new Python files into ${UNPACKED_DIR}desmume/"
             cp -r desmume/* "${UNPACKED_DIR}desmume/"
             
-            # 3. Fix the internal Metadata AND Directory Name
+            # 3. Fix the internal Metadata AND Version
             DIST_INFO_DIR=$(ls -d ${UNPACKED_DIR}*.dist-info | head -n 1)
             
-            # Update the Name inside the METADATA file
-            sed -i "s/Name: ${{ env.UPSTREAM_PACKAGE }}/Name: ${{ env.MY_PYPI_PACKAGE }}/g" "$DIST_INFO_DIR/METADATA"
+            # Overwrite the Name line in METADATA
+            sed -i "s/^Name: .*/Name: ${{ env.MY_PYPI_PACKAGE }}/g" "$DIST_INFO_DIR/METADATA"
             
-            # CRITICAL FIX: Rename the .dist-info folder to match the new package name
-            DIST_INFO_BASE=$(basename "$DIST_INFO_DIR")
-            NEW_DIST_INFO_BASE="${DIST_INFO_BASE/$OLD_PKG_US/$NEW_PKG_US}"
-            mv "$DIST_INFO_DIR" "${UNPACKED_DIR}${NEW_DIST_INFO_BASE}"
+            # Overwrite the Version line in METADATA with the one from setup.py
+            sed -i "s/^Version: .*/Version: ${{ env.TARGET_VERSION }}/g" "$DIST_INFO_DIR/METADATA"
             
-            # 4. Repack the wheel 
-            # (Because the .dist-info folder is now correct, wheel pack will automatically 
-            # output a perfectly named .whl file for PyPI!)
+            # CRITICAL: Rename the .dist-info folder to match the new package name AND the new version
+            mv "$DIST_INFO_DIR" "${UNPACKED_DIR}${NEW_PKG_US}-${{ env.TARGET_VERSION }}.dist-info"
+            
+            # 4. Repack the wheel
             python -m wheel pack "$UNPACKED_DIR" -d new_wheels/
             
             rm -rf unpacked/*
