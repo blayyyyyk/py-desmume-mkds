@@ -1,5 +1,5 @@
 # Builds on all branches & PRs
-# Deploys to PyPi on every successful build.
+# Deploys to PyPi on "release".
 name: Build, test and publish
 
 on:
@@ -171,9 +171,7 @@ jobs:
           name: mingw-wheels-msys2-py-${{ matrix.msystem }}
           path: dist/*.whl
   deploy:
-    # REMOVED: if: startsWith(github.ref, 'refs/tags/')
-    # ADDED (Optional but recommended): Ensure it only deploys on pushes, not on PRs
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - build-sdist
