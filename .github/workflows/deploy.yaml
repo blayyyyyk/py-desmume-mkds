@@ -1,41 +1,76 @@
-name: Deploy to PyPI
+name: Fast Deploy (Frankenstein Wheels)
 
 on:
   push:
     branches:
-      - 'deploy'
+      - 'deploy' # Push your Python changes here to trigger the bypass
 
 jobs:
-  deploy:
+  repack-and-deploy:
     runs-on: ubuntu-latest
-    name: Pull Release and Deploy
+    name: Inject Python & Deploy
+    
+    env:
+      # The repository you want to steal the compiled wheels from
+      UPSTREAM_REPO: "SkyTemple/py-desmume" 
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download wheels from latest release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir dist
-          cd dist
-          # This grabs all wheels and source distributions from the absolute latest release
-          gh release download --pattern "*.whl"
-          gh release download --pattern "*.tar.gz"
-
-      - name: Set up Python 3.12
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Upgrade pip and install twine
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twine
+          pip install wheel twine
 
-      - name: Publish wheels to PyPI
+      - name: Download Original Compiled Wheels
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir original_wheels
+          cd original_wheels
+          # Grabs all wheels from the absolute latest release of the upstream repo
+          gh release download --repo ${{ env.UPSTREAM_REPO }} --pattern "*.whl"
+
+      - name: Unpack, Inject, and Repack Wheels
+        run: |
+          mkdir unpacked
+          mkdir new_wheels
+          
+          # Loop through every downloaded wheel
+          for wheel in original_wheels/*.whl; do
+            echo "Processing $wheel..."
+            
+            # 1. Unpack the wheel
+            python -m wheel unpack "$wheel" -d unpacked/
+            
+            # Find the newly extracted directory (e.g., py_desmume-0.1.0)
+            UNPACKED_DIR=$(ls -d unpacked/*/ | head -n 1)
+            
+            # 2. Inject your modified Python files.
+            # IMPORTANT: This assumes your repo's Python code lives in a folder called 'desmume'
+            # and that it matches the folder structure inside the wheel.
+            echo "Injecting new Python files into ${UNPACKED_DIR}desmume/"
+            
+            # Copy all files from your repo's 'desmume' folder into the unpacked wheel, overwriting the old ones
+            cp -r desmume/* "${UNPACKED_DIR}desmume/"
+            
+            # 3. Repack the wheel. 
+            # The 'wheel pack' command automatically recalculates the SHA256 hashes in the .dist-info/RECORD file!
+            python -m wheel pack "$UNPACKED_DIR" -d new_wheels/
+            
+            # 4. Clean up the unpacked directory so it is empty for the next wheel in the loop
+            rm -rf unpacked/*
+          done
+
+      - name: Publish to PyPI
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
         run: |
-          twine upload dist/*
+          twine upload new_wheels/*.whl
