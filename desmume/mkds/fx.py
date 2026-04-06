@@ -64,7 +64,7 @@ class AsDictMixin:
 class Structure(ctypes.Structure, AsDictMixin):
 
     def __init__(self, *args, **kwds):
-        # We don't want to use positional arguments fill PADDING_* fields
+        # We don't want to use positional arguments fill PADDING_* fields.
 
         args = dict(zip(self.__class__._field_names_(), args))
         args.update(kwds)
