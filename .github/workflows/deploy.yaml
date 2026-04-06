@@ -11,8 +11,9 @@ jobs:
     name: Inject Python & Deploy
     
     env:
-      # The repository you want to steal the compiled wheels from
-      UPSTREAM_REPO: "SkyTemple/py-desmume" 
+      UPSTREAM_PACKAGE: "py-desmume" 
+      # Replace this with the exact name of your package on PyPI
+      MY_PYPI_PACKAGE: "py-desmume-mkds"
 
     steps:
       - name: Checkout repository
@@ -28,44 +29,61 @@ jobs:
           python -m pip install --upgrade pip
           pip install wheel twine
 
-      - name: Download Original Compiled Wheels
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Original Compiled Wheels from PyPI
         run: |
           mkdir original_wheels
           cd original_wheels
-          # Grabs all wheels from the absolute latest release of the upstream repo
-          gh release download --repo ${{ env.UPSTREAM_REPO }} --pattern "*.whl"
+          
+          echo "Fetching wheel URLs from PyPI for ${{ env.UPSTREAM_PACKAGE }}..."
+          
+          # 1. Fetch JSON from PyPI API
+          # 2. Use jq to parse the URLs of all .whl files for the latest version
+          WHEEL_URLS=$(curl -s https://pypi.org/pypi/${{ env.UPSTREAM_PACKAGE }}/json | jq -r '.urls[] | select(.filename | endswith(".whl")) | .url')
+          
+          # 3. Download every wheel
+          for url in $WHEEL_URLS; do
+            echo "Downloading $url..."
+            curl -O -L "$url"
+          done
 
       - name: Unpack, Inject, and Repack Wheels
         run: |
           mkdir unpacked
           mkdir new_wheels
           
-          # Loop through every downloaded wheel
           for wheel in original_wheels/*.whl; do
             echo "Processing $wheel..."
             
             # 1. Unpack the wheel
             python -m wheel unpack "$wheel" -d unpacked/
             
-            # Find the newly extracted directory (e.g., py_desmume-0.1.0)
             UNPACKED_DIR=$(ls -d unpacked/*/ | head -n 1)
             
             # 2. Inject your modified Python files.
-            # IMPORTANT: This assumes your repo's Python code lives in a folder called 'desmume'
-            # and that it matches the folder structure inside the wheel.
             echo "Injecting new Python files into ${UNPACKED_DIR}desmume/"
-            
-            # Copy all files from your repo's 'desmume' folder into the unpacked wheel, overwriting the old ones
             cp -r desmume/* "${UNPACKED_DIR}desmume/"
             
-            # 3. Repack the wheel. 
-            # The 'wheel pack' command automatically recalculates the SHA256 hashes in the .dist-info/RECORD file!
+            # 3. Fix the internal Metadata so PyPI accepts it under your package name
+            DIST_INFO_DIR=$(ls -d ${UNPACKED_DIR}*.dist-info | head -n 1)
+            echo "Updating package name in $DIST_INFO_DIR/METADATA..."
+            
+            # Use sed to replace the original package name with your custom package name
+            sed -i "s/Name: ${{ env.UPSTREAM_PACKAGE }}/Name: ${{ env.MY_PYPI_PACKAGE }}/g" "$DIST_INFO_DIR/METADATA"
+            
+            # 4. Repack the wheel (this recalculates all file hashes automatically)
+            # We rename the output wheel to match your new package name format
             python -m wheel pack "$UNPACKED_DIR" -d new_wheels/
             
-            # 4. Clean up the unpacked directory so it is empty for the next wheel in the loop
             rm -rf unpacked/*
+          done
+          
+          # Rename the actual .whl files to match the new package name
+          cd new_wheels
+          for file in *.whl; do
+            # Replaces hyphens with underscores per wheel naming conventions
+            OLD_PREFIX=$(echo "${{ env.UPSTREAM_PACKAGE }}" | tr '-' '_')
+            NEW_PREFIX=$(echo "${{ env.MY_PYPI_PACKAGE }}" | tr '-' '_')
+            mv "$file" "${file/$OLD_PREFIX/$NEW_PREFIX}"
           done
 
       - name: Publish to PyPI
