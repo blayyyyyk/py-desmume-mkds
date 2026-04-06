@@ -51,44 +51,44 @@ jobs:
           mkdir unpacked
           mkdir new_wheels
           
+          # Convert package hyphens to underscores for wheel specifications
+          OLD_PKG_US=$(echo "${{ env.UPSTREAM_PACKAGE }}" | tr '-' '_')
+          NEW_PKG_US=$(echo "${{ env.MY_PYPI_PACKAGE }}" | tr '-' '_')
+          
           for wheel in original_wheels/*.whl; do
             echo "Processing $wheel..."
             
             # 1. Unpack the wheel
             python -m wheel unpack "$wheel" -d unpacked/
-            
             UNPACKED_DIR=$(ls -d unpacked/*/ | head -n 1)
             
-            # 2. Inject your modified Python files.
+            # 2. Inject your modified Python files
             echo "Injecting new Python files into ${UNPACKED_DIR}desmume/"
             cp -r desmume/* "${UNPACKED_DIR}desmume/"
             
-            # 3. Fix the internal Metadata so PyPI accepts it under your package name
+            # 3. Fix the internal Metadata AND Directory Name
             DIST_INFO_DIR=$(ls -d ${UNPACKED_DIR}*.dist-info | head -n 1)
-            echo "Updating package name in $DIST_INFO_DIR/METADATA..."
             
-            # Use sed to replace the original package name with your custom package name
+            # Update the Name inside the METADATA file
             sed -i "s/Name: ${{ env.UPSTREAM_PACKAGE }}/Name: ${{ env.MY_PYPI_PACKAGE }}/g" "$DIST_INFO_DIR/METADATA"
             
-            # 4. Repack the wheel (this recalculates all file hashes automatically)
-            # We rename the output wheel to match your new package name format
+            # CRITICAL FIX: Rename the .dist-info folder to match the new package name
+            DIST_INFO_BASE=$(basename "$DIST_INFO_DIR")
+            NEW_DIST_INFO_BASE="${DIST_INFO_BASE/$OLD_PKG_US/$NEW_PKG_US}"
+            mv "$DIST_INFO_DIR" "${UNPACKED_DIR}${NEW_DIST_INFO_BASE}"
+            
+            # 4. Repack the wheel 
+            # (Because the .dist-info folder is now correct, wheel pack will automatically 
+            # output a perfectly named .whl file for PyPI!)
             python -m wheel pack "$UNPACKED_DIR" -d new_wheels/
             
             rm -rf unpacked/*
-          done
-          
-          # Rename the actual .whl files to match the new package name
-          cd new_wheels
-          for file in *.whl; do
-            # Replaces hyphens with underscores per wheel naming conventions
-            OLD_PREFIX=$(echo "${{ env.UPSTREAM_PACKAGE }}" | tr '-' '_')
-            NEW_PREFIX=$(echo "${{ env.MY_PYPI_PACKAGE }}" | tr '-' '_')
-            mv "$file" "${file/$OLD_PREFIX/$NEW_PREFIX}"
           done
 
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        # Added --verbose so PyPI gives you the exact reason if it fails again
         run: |
-          twine upload new_wheels/*.whl
+          twine upload --verbose new_wheels/*.whl
