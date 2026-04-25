@@ -1,41 +1,100 @@
-name: Deploy to PyPI
+name: Fast Deploy (Frankenstein Wheels)
 
 on:
   push:
     branches:
-      - 'deploy'
+      - 'deploy' # Push your Python changes here to trigger the bypass
 
 jobs:
-  deploy:
+  repack-and-deploy:
     runs-on: ubuntu-latest
-    name: Pull Release and Deploy
+    name: Inject Python & Deploy
+    
+    env:
+      UPSTREAM_PACKAGE: "py-desmume" 
+      # Replace this with the exact name of your package on PyPI
+      MY_PYPI_PACKAGE: "py-desmume-mkds"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download wheels from latest release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir dist
-          cd dist
-          # This grabs all wheels and source distributions from the absolute latest release
-          gh release download --pattern "*.whl"
-          gh release download --pattern "*.tar.gz"
-
-      - name: Set up Python 3.12
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Upgrade pip and install twine
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twine
+          pip install wheel twine setuptools
 
-      - name: Publish wheels to PyPI
+      - name: Download Original Compiled Wheels from PyPI
+        run: |
+          mkdir original_wheels
+          cd original_wheels
+          
+          echo "Fetching wheel URLs from PyPI for ${{ env.UPSTREAM_PACKAGE }}..."
+          
+          # 1. Fetch JSON from PyPI API
+          # 2. Use jq to parse the URLs of all .whl files for the latest version
+          WHEEL_URLS=$(curl -s https://pypi.org/pypi/${{ env.UPSTREAM_PACKAGE }}/json | jq -r '.urls[] | select(.filename | endswith(".whl")) | .url')
+          
+          # 3. Download every wheel
+          for url in $WHEEL_URLS; do
+            echo "Downloading $url..."
+            curl -O -L "$url"
+          done
+
+      - name: Extract Target Version
+        run: |
+          # Grabs the version defined in your setup.py
+          TARGET_VERSION=$(python -W ignore setup.py --version)
+          echo "Target version is $TARGET_VERSION"
+          # Save it to the GitHub environment so the next step can use it
+          echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
+
+      - name: Unpack, Inject, and Repack Wheels
+        run: |
+          mkdir unpacked
+          mkdir new_wheels
+          
+          # Convert package hyphens to underscores for the folder naming convention
+          NEW_PKG_US=$(echo "${{ env.MY_PYPI_PACKAGE }}" | tr '-' '_')
+          
+          for wheel in original_wheels/*.whl; do
+            echo "Processing $wheel..."
+            
+            # 1. Unpack the wheel
+            python -m wheel unpack "$wheel" -d unpacked/
+            UNPACKED_DIR=$(ls -d unpacked/*/ | head -n 1)
+            
+            # 2. Inject your modified Python files
+            echo "Injecting new Python files into ${UNPACKED_DIR}desmume/"
+            cp -r desmume/* "${UNPACKED_DIR}desmume/"
+            
+            # 3. Fix the internal Metadata AND Version
+            DIST_INFO_DIR=$(ls -d ${UNPACKED_DIR}*.dist-info | head -n 1)
+            
+            # Overwrite the Name line in METADATA
+            sed -i "s/^Name: .*/Name: ${{ env.MY_PYPI_PACKAGE }}/g" "$DIST_INFO_DIR/METADATA"
+            
+            # Overwrite the Version line in METADATA with the one from setup.py
+            sed -i "s/^Version: .*/Version: ${{ env.TARGET_VERSION }}/g" "$DIST_INFO_DIR/METADATA"
+            
+            # CRITICAL: Rename the .dist-info folder to match the new package name AND the new version
+            mv "$DIST_INFO_DIR" "${UNPACKED_DIR}${NEW_PKG_US}-${{ env.TARGET_VERSION }}.dist-info"
+            
+            # 4. Repack the wheel
+            python -m wheel pack "$UNPACKED_DIR" -d new_wheels/
+            
+            rm -rf unpacked/*
+          done
+
+      - name: Publish to PyPI
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        # Added --verbose so PyPI gives you the exact reason if it fails again
         run: |
-          twine upload dist/*
+          twine upload --verbose new_wheels/*.whl
